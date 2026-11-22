@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from finder_core.models import SignalKind
+from vibrational_finder.core.models import SignalKind
 
 
 WAVENUMBERS_PER_EV = 8065.544005

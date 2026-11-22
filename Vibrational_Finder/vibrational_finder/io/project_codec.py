@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from dataclasses import fields
-from typing import Protocol, TypeVar, cast
+from dataclasses import asdict, fields
+from typing import TYPE_CHECKING, Protocol, TypeVar, cast
 
-from finder_core.models import CandidateRecord, MatchScore, SignalKind, SignalTrace
+import numpy as np
+
+from vibrational_finder.cancellation import checkpoint
+from vibrational_finder.core.models import CandidateRecord, MatchScore, SignalKind, SignalTrace
 from vibrational_finder.models import (
     CompoundCandidate,
     ObservedSpectrum,
@@ -13,7 +16,7 @@ from vibrational_finder.models import (
     SpectralBand,
     VibrationalMatchResult,
 )
-from vibrational_finder.profile_state import SpectrumProfileState
+from vibrational_finder.profile_state import SavedGain, SpectrumProfileState
 from vibrational_finder.processing_state import (
     ProcessingOperation,
     SpectrumProcessingState,
@@ -22,6 +25,10 @@ from vibrational_finder.processing_state import (
 from vibrational_finder.project_model import normalize_project_state, stable_spectrum_id
 from vibrational_finder.project_state import ProjectUiState, VibrationalProjectState
 from vibrational_finder.project_series import ProjectSeries
+from vibrational_finder.raman_gain import GainMatch, GainWindow, RamanPeakPriority
+
+if TYPE_CHECKING:
+    from vibrational_finder.phase_subtraction_work import PhaseFitResult
 
 
 class ProjectAssetWriter(Protocol):
@@ -49,9 +56,12 @@ def _array(value: object, path: str) -> list[object]:
 
 def _kind(value: object, path: str) -> SignalKind:
     try:
-        return SignalKind(str(value))
+        kind = SignalKind(str(value))
     except ValueError as exc:
         raise ValueError(f"{path} contains an invalid signal kind: {value!r}.") from exc
+    if kind == SignalKind.FTIR:
+        raise ValueError(f"{path} contains infrared data, which RPFF does not support.")
+    return kind
 
 
 def _encode_band(band: SpectralBand) -> dict[str, object]:
@@ -123,6 +133,7 @@ def _decode_band_set(value: object, path: str) -> ReferenceBandSet | None:
 
 
 def _encode_record(record: CandidateRecord) -> dict[str, object]:
+    _kind(record.kind.value, "reference.kind")
     return {
         "key": record.key,
         "source": record.source,
@@ -177,8 +188,8 @@ def _decode_reference(
         raise ValueError(f"{path}.asset is required.")
     trace = assets.load_trace(member, ReferenceSpectrum)
     return ReferenceSpectrum(
-        x=list(trace.x),
-        y=list(trace.y),
+        x=trace.x,
+        y=trace.y,
         kind=trace.kind,
         name=trace.name,
         source_path=trace.source_path,
@@ -196,6 +207,24 @@ def _encode_candidate(
     data = _encode_record(candidate)
     data["reference"] = _encode_reference(candidate.reference, assets, candidate.key)
     data["band_set"] = _encode_band_set(candidate.band_set)
+    if candidate.card_payload is not None:
+        # Source adapters import project I/O during package initialization.
+        from vibrational_finder.services.reference_card_io import reference_profiles
+
+        source = candidate.card_payload
+        card = deepcopy({key: value for key, value in source.items() if key not in {"profile", "profiles"}})
+        profiles = []
+        for index, profile in enumerate(reference_profiles(source)):
+            trace = SignalTrace(profile["x"], profile["y"], kind=SignalKind.RAMAN, x_unit="", y_unit="")
+            profiles.append({
+                **deepcopy({key: value for key, value in profile.items() if key not in {"x", "y"}}),
+                "_rpff_trace": assets.store_trace("references", f"{candidate.key}-card-{index}", trace),
+            })
+        if "profiles" in source:
+            card["profiles"] = profiles
+        elif profiles:
+            card["profile"] = profiles[0]
+        data["card_payload"] = card
     return data
 
 
@@ -206,6 +235,19 @@ def _decode_candidate(
 ) -> CompoundCandidate:
     data = _object(value, path)
     record = _decode_record(data, path)
+    card = None
+    if data.get("card_payload") is not None:
+        from vibrational_finder.services.reference_card_io import validate_reference_card
+
+        card = deepcopy(_object(data["card_payload"], f"{path}.card_payload"))
+        profiles = _array(card["profiles"], f"{path}.card_payload.profiles") if "profiles" in card else (
+            [card["profile"]] if "profile" in card else []
+        )
+        for index, value in enumerate(profiles):
+            profile = _object(value, f"{path}.card_payload profile {index}")
+            trace = assets.load_trace(str(profile.pop("_rpff_trace", "")), SignalTrace)
+            profile.update(x=trace.x, y=trace.y)
+        validate_reference_card(card)
     return CompoundCandidate(
         key=record.key,
         source=record.source,
@@ -216,6 +258,7 @@ def _decode_candidate(
         metadata=dict(record.metadata),
         reference=_decode_reference(data.get("reference"), assets, f"{path}.reference"),
         band_set=_decode_band_set(data.get("band_set"), f"{path}.band_set"),
+        card_payload=card,
     )
 
 
@@ -261,6 +304,7 @@ def _decode_result(
     assets: ProjectAssetReader,
     path: str,
 ) -> VibrationalMatchResult:
+    checkpoint()
     data = _object(value, path)
 
     def bands(name: str) -> list[SpectralBand]:
@@ -321,10 +365,22 @@ def _encode_profile_state(
             raise ValueError(f"profile_states[{profile_key!r}] contains duplicate result key {key!r}.")
         result_by_key[key] = result
     selected_keys: list[str] = []
+    selected_entries: list[object] = []
+    seen_selected: set[str] = set()
+    has_snapshots = False
     for result in state.selected_results:
         key = result.candidate.key
-        if key in result_by_key and key not in selected_keys:
+        if key in seen_selected:
+            continue
+        seen_selected.add(key)
+        original = result_by_key.get(key)
+        if original is not None:
             selected_keys.append(key)
+        if original is result:
+            selected_entries.append(key)
+        else:
+            selected_entries.append(_encode_result(result, assets))
+            has_snapshots = True
     return {
         "spectrum": (
             _encode_observed(state.spectrum, assets, "spectra/processed", f"{profile_key}-profile")
@@ -333,8 +389,11 @@ def _encode_profile_state(
         ),
         "results": [_encode_result(result, assets) for result in state.results],
         "residual_results": [_encode_result(result, assets) for result in state.residual_results],
+        **({"gain": _encode_saved_gain(state.saved_gain)} if state.saved_gain is not None else {}),
+        **({"phase_fit": _encode_phase_fit(state.phase_fit, assets, profile_key)} if state.phase_fit is not None else {}),
         "browse_records": [_encode_record(record) for record in state.browse_records],
         "selected_result_keys": selected_keys,
+        **({"selected_results": selected_entries} if has_snapshots else {}),
         "visible_selected_candidate_keys": sorted(state.visible_selected_candidate_keys),
         "cumulative_unassigned_bands": [_encode_band(band) for band in state.cumulative_unassigned_bands],
         "processing": {
@@ -366,13 +425,22 @@ def _decode_profile_state(
         if key in result_by_key:
             raise ValueError(f"{path}.results contains duplicate candidate key {key!r}.")
         result_by_key[key] = result
-    raw_selected = _array(data.get("selected_result_keys", []), f"{path}.selected_result_keys")
+    selected_field = "selected_results" if "selected_results" in data else "selected_result_keys"
+    raw_selected = _array(data.get(selected_field, []), f"{path}.{selected_field}")
     selected: list[VibrationalMatchResult] = []
-    for item in raw_selected:
-        key = str(item)
-        if key not in result_by_key:
-            raise ValueError(f"{path}.selected_result_keys references missing result {key!r}.")
-        selected.append(result_by_key[key])
+    selected_keys: set[str] = set()
+    for index, item in enumerate(raw_selected):
+        if isinstance(item, dict) and selected_field == "selected_results":
+            result = _decode_result(item, assets, f"{path}.{selected_field}[{index}]")
+        else:
+            key = str(item)
+            if key not in result_by_key:
+                raise ValueError(f"{path}.{selected_field} references missing result {key!r}.")
+            result = result_by_key[key]
+        if result.candidate.key in selected_keys:
+            raise ValueError(f"{path}.{selected_field} contains a duplicate selected result.")
+        selected_keys.add(result.candidate.key)
+        selected.append(result)
     raw_browse = _array(data.get("browse_records", []), f"{path}.browse_records")
     raw_visible = _array(
         data.get("visible_selected_candidate_keys", []),
@@ -416,7 +484,106 @@ def _decode_profile_state(
             for index, item in enumerate(raw_cumulative)
         ],
         processing=processing,
+        saved_gain=_decode_saved_gain(data.get("gain"), results, f"{path}.gain"),
+        phase_fit=_decode_phase_fit(data.get("phase_fit"), assets, f"{path}.phase_fit"),
     )
+
+
+def _encode_phase_fit(result: PhaseFitResult, assets: ProjectAssetWriter, key: str) -> dict[str, object]:
+    fit = result.fit
+    data: dict[str, object] = {
+        "references": {name: [_encode_band(band) for band in bands] for name, bands in result.references.items()},
+    }
+    if fit is not None:
+        x = fit.x.tolist()
+        for name in ("measured", "corrected", "background"):
+            trace = SignalTrace(x=x, y=getattr(fit, name).tolist(), kind=SignalKind.RAMAN)
+            data[name] = assets.store_trace("spectra/processed", f"{key}-phase-{name}", trace)
+        data["bands"] = [asdict(band) for band in fit.bands]
+    return data
+
+
+def _decode_phase_fit(value: object, assets: ProjectAssetReader, path: str) -> PhaseFitResult | None:
+    if value is None:
+        return None
+    from vibrational_finder.phase_subtraction_work import PhaseFitResult
+    from vibrational_finder.services.phase_deconvolution import FittedBand, PhaseSubtractionFit
+
+    data = _object(value, path)
+    references = {
+        key: tuple(_decode_band(band, f"{path}.references[{key!r}]") for band in _array(bands, path))
+        for key, bands in _object(data.get("references", {}), f"{path}.references").items()
+    }
+    if "corrected" not in data:
+        return PhaseFitResult(references, None)
+    traces = [
+        assets.load_trace(str(data.get(name, "")), SignalTrace)
+        for name in ("measured", "corrected", "background")
+    ]
+    x = traces[0].x
+    if not x or any(trace.x != x or len(trace.y) != len(x) for trace in traces):
+        raise ValueError(f"{path} trace coordinates do not match.")
+    bands = []
+    try:
+        for raw_band in _array(data.get("bands", []), f"{path}.bands"):
+            band_data = _object(raw_band, f"{path}.bands entry")
+            curve_x, curve_y = (
+                tuple(map(float, _array(band_data[name], f"{path}.bands.{name}"))) for name in ("curve_x", "curve_y")
+            )
+            if len(curve_x) != len(curve_y):
+                raise ValueError("Mismatched curve coordinates.")
+            bands.append(FittedBand(**{**band_data, "curve_x": curve_x, "curve_y": curve_y}))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"{path} contains invalid fitted bands.") from exc
+    measured, corrected, background = (np.asarray(trace.y, dtype=float) for trace in traces)
+    return PhaseFitResult(references, PhaseSubtractionFit(np.asarray(x, dtype=float), measured, corrected, tuple(bands), background))
+
+
+def _encode_saved_gain(gain: SavedGain) -> dict[str, object]:
+    return {
+        "bands": [_encode_band(band) for band in gain.bands],
+        "window": asdict(gain.window),
+        "priority": gain.priority.value,
+        "matches": {key: asdict(match) for key, match in gain.matches.items()},
+        "ranked": gain.ranked,
+        "available": gain.available,
+    }
+
+
+def _decode_saved_gain(value: object, results: list[VibrationalMatchResult], path: str) -> SavedGain | None:
+    if value is None:
+        return None
+    data = _object(value, path)
+    bands = tuple(_decode_band(band, f"{path}.bands") for band in _array(data.get("bands", []), f"{path}.bands"))
+    window = _object(data.get("window", {}), f"{path}.window")
+    references = {result.candidate.key: len(result.reference_bands) for result in results}
+
+    def interval(item: object) -> tuple[float, float]:
+        low, high = _array(item, f"{path}.window interval")
+        return float(low), float(high)
+
+    try:
+        measured = interval(window["measured"]) if window.get("measured") is not None else None
+        masked = tuple(interval(item) for item in _array(window.get("masked", []), f"{path}.window.masked"))
+        matches = {}
+        for key, value in _object(data.get("matches", {}), f"{path}.matches").items():
+            item = _object(value, f"{path}.matches[{key!r}]")
+            pairs = []
+            for pair in _array(item.get("pairs", []), f"{path}.matches[{key!r}].pairs"):
+                i, j, delta = _array(pair, f"{path}.match pair")
+                if type(i) is not int or type(j) is not int or not (0 <= i < len(bands) and 0 <= j < references.get(key, 0)):
+                    raise ValueError("Gain pair contains an invalid band index.")
+                pairs.append((i, j, float(delta)))
+            matches[key] = GainMatch(
+                float(item["quality"]), float(item["shift"]), tuple(pairs),
+                int(item["eligible_reference_count"]), int(item.get("strong_target", 0)),
+            )
+        return SavedGain(
+            bands, GainWindow(measured, masked), RamanPeakPriority(data.get("priority", "off")), matches,
+            ranked=bool(data.get("ranked", False)), available=bool(data.get("available", True)),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"{path} contains invalid saved Gain results.") from exc
 
 
 def _encode_ui_state(state: ProjectUiState) -> dict[str, object]:
@@ -427,8 +594,6 @@ def _encode_ui_state(state: ProjectUiState) -> dict[str, object]:
         "multi_offset": int(state.multi_offset),
         "reference_origin": state.reference_origin,
         "reference_view": state.reference_view,
-        "include_raman": bool(state.include_raman),
-        "include_ftir": bool(state.include_ftir),
         "enabled_sources": dict(state.enabled_sources),
         "composition_mode": state.composition_mode,
         "composition_elements": list(state.composition_elements),
@@ -437,6 +602,7 @@ def _encode_ui_state(state: ProjectUiState) -> dict[str, object]:
         "exclude_all_other_elements": bool(state.exclude_all_other_elements),
         "plot_view_settings": deepcopy(state.plot_view_settings),
         "tree_expansion_state": dict(state.tree_expansion_state),
+        "search_mode": state.search_mode,
     }
 
 
@@ -468,8 +634,6 @@ def _decode_ui_state(value: object, path: str) -> ProjectUiState:
             multi_offset=int(data.get("multi_offset", 10)),
             reference_origin=str(data.get("reference_origin", "both")),
             reference_view=str(data.get("reference_view", "profiles")),
-            include_raman=bool(data.get("include_raman", True)),
-            include_ftir=bool(data.get("include_ftir", True)),
             enabled_sources={str(key): bool(item) for key, item in enabled_sources.items()},
             composition_mode=str(data.get("composition_mode", "only")),
             composition_elements=[str(item) for item in composition_elements],
@@ -478,6 +642,7 @@ def _decode_ui_state(value: object, path: str) -> ProjectUiState:
             exclude_all_other_elements=bool(data.get("exclude_all_other_elements", False)),
             plot_view_settings=deepcopy(plot_settings),
             tree_expansion_state={str(key): bool(item) for key, item in tree_expansion_state.items()},
+            search_mode=str(data.get("search_mode", "")),
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{path} contains invalid UI settings.") from exc
@@ -498,16 +663,10 @@ def encode_project_state(
         "active_spectrum_key": state.active_spectrum_key,
         "active_profile_spectrum_key": state.active_profile_spectrum_key,
         "visible_observed_keys": sorted(state.visible_observed_keys),
-        "spectra": {
-            "raman": [
-                _encode_observed(spectrum, assets, "spectra/processed", f"raman-{index}")
-                for index, spectrum in enumerate(state.raman_spectra)
-            ],
-            "ftir": [
-                _encode_observed(spectrum, assets, "spectra/processed", f"ftir-{index}")
-                for index, spectrum in enumerate(state.ftir_spectra)
-            ],
-        },
+        "spectra": [
+            _encode_observed(spectrum, assets, "spectra/processed", f"raman-{index}")
+            for index, spectrum in enumerate(state.raman_spectra)
+        ],
         "original_observed": [
             {
                 "source_key": source_key,
@@ -530,6 +689,8 @@ def encode_project_state(
             for key, profile in state.profile_states.items()
         },
         "candidate_colors": dict(state.candidate_colors),
+        "working_references": [_encode_result(item, assets) for item in state.working_references],
+        "visible_working_reference_keys": sorted(state.visible_working_reference_keys),
         "ui": _encode_ui_state(state.ui),
         "extensions": deepcopy(state.extensions),
     }
@@ -540,9 +701,7 @@ def decode_project_state(
     assets: ProjectAssetReader,
 ) -> VibrationalProjectState:
     data = _object(value, "project")
-    spectra = _object(data.get("spectra", {}), "project.spectra")
-    raw_raman = _array(spectra.get("raman", []), "project.spectra.raman")
-    raw_ftir = _array(spectra.get("ftir", []), "project.spectra.ftir")
+    raw_spectra = _array(data.get("spectra"), "project.spectra")
     raw_originals = _array(data.get("original_observed", []), "project.original_observed")
     raw_records = _array(data.get("reference_records", []), "project.reference_records")
     raw_references = _array(data.get("reference_spectra", []), "project.reference_spectra")
@@ -583,12 +742,8 @@ def decode_project_state(
         ]
 
     raman_spectra = [
-        _decode_observed(item, assets, f"project.spectra.raman[{index}]")
-        for index, item in enumerate(raw_raman)
-    ]
-    ftir_spectra = [
-        _decode_observed(item, assets, f"project.spectra.ftir[{index}]")
-        for index, item in enumerate(raw_ftir)
+        _decode_observed(item, assets, f"project.spectra[{index}]")
+        for index, item in enumerate(raw_spectra)
     ]
     decoded_series: list[ProjectSeries] = []
     for index, item in enumerate(raw_series):
@@ -614,7 +769,6 @@ def decode_project_state(
         ),
         visible_observed_keys={str(item) for item in raw_visible},
         raman_spectra=raman_spectra,
-        ftir_spectra=ftir_spectra,
         original_observed=originals,
         reference_records=[
             _decode_record(item, f"project.reference_records[{index}]")
@@ -632,6 +786,14 @@ def decode_project_state(
             for key, item in raw_profiles.items()
         },
         candidate_colors={str(key): str(item) for key, item in raw_colors.items()},
+        working_references=[
+            _decode_result(item, assets, f"project.working_references[{index}]")
+            for index, item in enumerate(_array(data.get("working_references", []), "project.working_references"))
+        ],
+        visible_working_reference_keys={
+            str(item) for item in _array(data.get("visible_working_reference_keys", []),
+                                         "project.visible_working_reference_keys")
+        },
         ui=_decode_ui_state(data.get("ui", {}), "project.ui"),
         extensions=cast(dict[str, object], deepcopy(extensions)),
     )

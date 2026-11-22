@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from finder_core.models import SignalKind
+from vibrational_finder.core.models import SignalKind
 from vibrational_finder.services.spectroscopy_source_catalog import SpectroscopySourceCatalog
 
 

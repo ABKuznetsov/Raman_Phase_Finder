@@ -8,12 +8,15 @@ from PySide6.QtWidgets import (
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from vibrational_finder.services.user_reference_store import UserReferenceStore, read_reference_card, write_json_atomic
+from vibrational_finder.services.reference_card_io import provenance_label, read_reference_card, write_reference_card
+from vibrational_finder.services.user_reference_store import UserReferenceStore
 from vibrational_finder.raman_product import is_infrared_card
 from vibrational_finder.ui.reference_editor import ReferenceEditorDialog
 
 
-_CARD_FILTER = "Reference cards (*.json *.vsref);;JSON (*.json);;All files (*)"
+_IMPORT_FILTER = "Raman reference cards (*.rref *.json *.vsref);;All files (*)"
+_RREF_FILTER = "Raman reference card (*.rref)"
+_JSON_FILTER = "JSON card (*.json)"
 
 
 class UserReferenceLibraryDialog(QDialog):
@@ -33,9 +36,9 @@ class UserReferenceLibraryDialog(QDialog):
         layout.addWidget(self.summary)
 
         controls = QHBoxLayout()
-        self.add_button = QPushButton("Add reference…")
+        self.add_button = QPushButton("Create reference…")
         self.edit_button = QPushButton("Edit…")
-        self.import_button = QPushButton("Import JSON…")
+        self.import_button = QPushButton("Import card…")
         self.export_button = QPushButton("Export card…")
         for button, handler in (
             (self.add_button, self.add_reference), (self.edit_button, self._edit_selected),
@@ -50,10 +53,11 @@ class UserReferenceLibraryDialog(QDialog):
         layout.addLayout(controls)
 
         self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(["Reference", "Formula", "Technique", "Bands"])
+        self.table.setHorizontalHeaderLabels(["Reference", "Formula", "Bands", "Source"])
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
@@ -76,8 +80,8 @@ class UserReferenceLibraryDialog(QDialog):
             metadata = payload.get("metadata") or {}
             band_count = sum(item.get("position_cm1") not in (None, "") for item in payload.get("bands") or [])
             for column, value in enumerate((
-                metadata.get("name") or "Untitled reference", metadata.get("formula") or "",
-                str(payload.get("kind") or metadata.get("method") or "").upper(), band_count,
+                metadata.get("name") or metadata.get("formula") or "Untitled reference", metadata.get("formula") or "",
+                band_count, provenance_label(payload),
             )):
                 item = QTableWidgetItem(str(value))
                 if column == 0:
@@ -124,13 +128,13 @@ class UserReferenceLibraryDialog(QDialog):
                     if key not in editor.fields and key not in {"notes", "origin"}
                 }
                 payload["metadata"] = {**other_metadata, **payload["metadata"]}
-                payload = {**original, **payload}
+                payload = {**{key: value for key, value in original.items() if key != "profile"}, **payload}
             self._save(payload, card_id=card_id)
         finally:
             editor.deleteLater()
 
     def _import_card(self) -> None:
-        name, _ = QFileDialog.getOpenFileName(self, "Import reference card", "", _CARD_FILTER)
+        name, _ = QFileDialog.getOpenFileName(self, "Import reference card", "", _IMPORT_FILTER)
         if not name:
             return
         try:
@@ -155,13 +159,23 @@ class UserReferenceLibraryDialog(QDialog):
         card = self.cards.get(self._selected_id())
         if card is None:
             return
-        name, _ = QFileDialog.getSaveFileName(self, "Export reference card", "vibrational_reference.json", _CARD_FILTER)
+        name, selected = QFileDialog.getSaveFileName(
+            self, "Export reference card", "raman_reference", f"{_RREF_FILTER};;{_JSON_FILTER}",
+        )
         if not name:
             return
         try:
-            target = Path(name)
+            entered = Path(name)
+            target = entered
+            suffix = {_JSON_FILTER: ".json", _RREF_FILTER: ".rref"}.get(selected)
+            if suffix is not None and entered.suffix.lower() != suffix:
+                target = entered.with_suffix(suffix)
+            elif not entered.suffix:
+                target = entered.with_suffix(".rref")
+            if target != entered and target.exists():
+                raise ValueError(f"{target.name} already exists. Select that exact filename to replace it.")
             if target.resolve() == self.store.path.resolve():
                 raise ValueError("Choose a different file from the user library.")
-            write_json_atomic(target, card)
+            write_reference_card(target, card)
         except (OSError, ValueError) as exc:
             QMessageBox.warning(self, "Reference export failed", str(exc))

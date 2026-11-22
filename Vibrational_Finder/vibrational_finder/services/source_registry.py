@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from finder_core.data_sources import DataSource
+from vibrational_finder.core.data_sources import DataSource
 
 
 @dataclass(slots=True)

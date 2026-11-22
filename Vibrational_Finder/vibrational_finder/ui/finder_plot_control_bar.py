@@ -3,7 +3,7 @@ from __future__ import annotations
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtWidgets import QBoxLayout, QComboBox, QHBoxLayout, QLabel, QLayout, QSizePolicy, QSlider, QToolButton, QWidget
 
-from finder_core.models import SignalKind
+from vibrational_finder.core.models import SignalKind
 from vibrational_finder.ui.wrapping_layout import WrappingLayout
 
 

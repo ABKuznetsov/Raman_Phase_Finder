@@ -18,14 +18,11 @@ def project_save_path(path: str) -> str:
 
 
 def project_save_filter() -> str:
-    return "Raman Finder projects (*.irff);;All files (*)"
+    return f"Raman Phase Finder projects (*{PORTABLE_PROJECT_SUFFIX})"
 
 
 def project_open_filter() -> str:
-    return (
-        "Raman Finder projects (*.irff);;"
-        "Legacy Raman projects (*.irraman.json *.json);;All files (*)"
-    )
+    return project_save_filter()
 
 
 def dataclass_values(cls: type[_DataclassT], values: dict[str, object]) -> dict[str, object]:

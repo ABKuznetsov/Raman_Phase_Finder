@@ -1,4 +1,4 @@
-from finder_core.models import CandidateRecord, MatchScore, SignalFeature, SignalKind, SignalTrace
+from .models import CandidateRecord, MatchScore, SignalFeature, SignalKind, SignalTrace
 
 __all__ = [
     "CandidateRecord",

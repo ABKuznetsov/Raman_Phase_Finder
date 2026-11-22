@@ -5,7 +5,6 @@ from dataclasses import replace
 
 import numpy as np
 
-from finder_core.models import SignalKind
 from vibrational_finder.models import ObservedSpectrum
 from vibrational_finder.processing_state import ProcessingOperation, SpectrumProcessingState
 from vibrational_finder.profile_state import SpectrumProfileState
@@ -106,8 +105,7 @@ class SpectrumProcessingController:
         residual = replace(preview, id=identity, name=name, source_path="")
         # The residual's recipe starts at the exact processed input used in the fit.
         original = replace(deepcopy(current), id=identity, name=name, source_path="")
-        collection = self.project.ftir_spectra if current.kind == SignalKind.FTIR else self.project.raman_spectra
-        collection.append(residual)
+        self.project.raman_spectra.append(residual)
         self.project.spectrum_order_ids.append(identity)
         self.project.visible_observed_keys.add(identity)
         self.project.original_observed[identity] = original
@@ -142,8 +140,7 @@ class SpectrumProcessingController:
         for key, value in self.project.sample_metadata.get(spectrum_id, {}).items():
             if "laser" in key.lower() or "excitation" in key.lower():
                 metadata[key] = value
-        collection = self.project.ftir_spectra if observed.kind == SignalKind.FTIR else self.project.raman_spectra
-        collection.append(derived)
+        self.project.raman_spectra.append(derived)
         self.project.original_observed[identity] = deepcopy(derived)
         self.project.spectrum_order_ids.append(identity)
         self.project.visible_observed_keys.add(identity)
@@ -192,8 +189,7 @@ class SpectrumProcessingController:
             observed, id=identity, name=f"{observed.name or observed.id} — {suffix}",
             source_path="", x=output_x, y=values.tolist(),
         )
-        collection = self.project.ftir_spectra if observed.kind == SignalKind.FTIR else self.project.raman_spectra
-        collection.append(derived)
+        self.project.raman_spectra.append(derived)
         self.project.original_observed[identity] = deepcopy(derived)
         self.project.spectrum_order_ids.append(identity)
         self.project.visible_observed_keys.add(identity)
@@ -261,25 +257,16 @@ class SpectrumProcessingController:
         original: ObservedSpectrum,
         needs_embed: bool,
     ) -> ObservedSpectrum:
-        target_list: list[ObservedSpectrum] | None = None
-        index: int | None = None
-        for spectra in (self.project.raman_spectra, self.project.ftir_spectra):
-            found = next(
-                (item_index for item_index, spectrum in enumerate(spectra) if spectrum.id == spectrum_id),
-                None,
-            )
-            if found is not None:
-                target_list = spectra
-                index = found
-                break
-        if target_list is None or index is None:
+        spectra = self.project.raman_spectra
+        index = next((i for i, spectrum in enumerate(spectra) if spectrum.id == spectrum_id), None)
+        if index is None:
             raise ValueError(f"Unknown observed spectrum: {spectrum_id!r}.")
 
         profile = self.project.profile_states.get(spectrum_id)
         if profile is None:
             profile = SpectrumProfileState()
             self.project.profile_states[spectrum_id] = profile
-        target_list[index] = result
+        spectra[index] = result
         if needs_embed:
             self.project.original_observed[spectrum_id] = deepcopy(original)
         self.project.sample_bands.pop(spectrum_id, None)
@@ -287,6 +274,8 @@ class SpectrumProcessingController:
         profile.processing = state
         profile.results.clear()
         profile.residual_results.clear()
+        profile.saved_gain = None
+        profile.phase_fit = None
         profile.browse_records.clear()
         profile.selected_results.clear()
         profile.visible_selected_candidate_keys.clear()

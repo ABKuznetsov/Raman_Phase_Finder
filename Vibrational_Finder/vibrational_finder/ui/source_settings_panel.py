@@ -320,10 +320,12 @@ class SourceSettingsPanel(QWidget):
         for column in columns:
             column.addStretch(1)
 
-    def set_catalog(self, catalog: SpectroscopySourceCatalog) -> None:
+    def set_catalog(self, catalog: SpectroscopySourceCatalog, *, refresh: bool = True) -> None:
         self.catalog = catalog
         self.manager = SpectroscopySourceManager(catalog)
-        if self._populated:
+        if not refresh:
+            self._populated = False
+        elif self._populated:
             self.refresh()
 
     def _user_library(self) -> UserReferenceLibraryDialog:

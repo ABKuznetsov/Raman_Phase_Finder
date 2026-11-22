@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from urllib.parse import quote_plus
 
-from finder_core.data_sources import SourceQuery
-from finder_core.models import CandidateRecord, SignalTrace
+from vibrational_finder.core.data_sources import SourceQuery
+from vibrational_finder.core.models import CandidateRecord, SignalTrace
 
 
 @dataclass(frozen=True, slots=True)

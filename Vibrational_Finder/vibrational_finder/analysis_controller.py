@@ -6,7 +6,8 @@ import hashlib
 import json
 from typing import Any
 
-from finder_core.data_sources import SourceQuery
+from vibrational_finder.cancellation import JobCancelled, checkpoint
+from vibrational_finder.core.data_sources import SourceQuery
 from vibrational_finder.models import ObservedSpectrum, SpectralBand
 from vibrational_finder.profile_state import SpectrumProfileState
 from vibrational_finder.project_document import ProjectDocument
@@ -16,6 +17,7 @@ from vibrational_finder.services.candidate_search_service import (
     CandidateSearchResult,
     CandidateSearchService,
 )
+from vibrational_finder.services.spectroscopy_source_catalog import CatalogSourceHandle
 
 
 def _digest(value: object) -> str:
@@ -107,8 +109,6 @@ class AnalysisController:
                 "element_states": dict(ui.element_states),
                 "exclude_all_other_elements": bool(ui.exclude_all_other_elements),
                 "reference_origin": ui.reference_origin,
-                "include_raman": ui.include_raman,
-                "include_ftir": ui.include_ftir,
                 "laser_nm": float(ui.laser_nm),
             }
         )
@@ -161,13 +161,29 @@ class AnalysisController:
         )
 
     def run(self, request: AnalysisSearchRequest) -> AnalysisSearchOutcome:
-        result = CandidateSearchService(request.sources).search(
+        sources = []
+        unavailable = {}
+        for source in request.sources:
+            checkpoint()
+            if isinstance(source, CatalogSourceHandle):
+                try:
+                    sources.append(source.open())
+                except JobCancelled:
+                    raise
+                except Exception as exc:
+                    unavailable[source.name] = str(exc)
+            else:
+                sources.append(source)
+        if unavailable and not sources:
+            raise ValueError(f"No enabled source is available: {', '.join(sorted(unavailable))}")
+        result = CandidateSearchService(sources).search(
             deepcopy(request.query),
             deepcopy(request.observed),
             deepcopy(request.options),
             observed_bands=list(deepcopy(request.observed_bands)),
             prefilter_bands=list(deepcopy(request.observed_bands)) or None,
         )
+        result.source_failures.update(unavailable)
         return AnalysisSearchOutcome(request=request, result=result)
 
     def apply_if_current(self, outcome: AnalysisSearchOutcome) -> bool:
@@ -188,6 +204,7 @@ class AnalysisController:
         )
         profile.results = merged_results
         profile.residual_results.clear()
+        profile.saved_gain = None
         profile.browse_records = result.shortlist_records
         self.document.mark_changed()
         return True

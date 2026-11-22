@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 import hashlib
 
-from finder_core.models import SignalKind
+from vibrational_finder.core.models import SignalKind
 from vibrational_finder.models import ObservedSpectrum
 from vibrational_finder.project_series import new_project_object_id, normalized_spectrum_order, prune_series_memberships
 from vibrational_finder.project_state import VibrationalProjectState
@@ -15,8 +15,8 @@ def stable_spectrum_id(*identity_parts: object) -> str:
 
 
 def observed_spectra(state: VibrationalProjectState) -> list[ObservedSpectrum]:
-    """Return every observed spectrum once, honoring the mixed project order."""
-    available = [*state.raman_spectra, *state.ftir_spectra]
+    """Return each observed spectrum once in project order."""
+    available = state.raman_spectra
     first_by_id: dict[str, ObservedSpectrum] = {}
     for spectrum in available:
         first_by_id.setdefault(spectrum.id, spectrum)
@@ -36,7 +36,7 @@ def observed_spectra(state: VibrationalProjectState) -> list[ObservedSpectrum]:
 
 def observed_by_id(state: VibrationalProjectState) -> dict[str, ObservedSpectrum]:
     result: dict[str, ObservedSpectrum] = {}
-    for spectrum in [*state.raman_spectra, *state.ftir_spectra]:
+    for spectrum in state.raman_spectra:
         result.setdefault(spectrum.id, spectrum)
     return result
 
@@ -45,7 +45,7 @@ def original_observed_for(
     state: VibrationalProjectState,
     spectrum_id: str,
 ) -> ObservedSpectrum | None:
-    """Resolve both current ID keys and source-path keys written by older IRFF files."""
+    """Find the original measurement by ID or source path."""
     spectrum = observed_by_id(state).get(spectrum_id)
     if spectrum is None:
         return None
@@ -75,7 +75,7 @@ def spectrum_identity_aliases(spectrum: ObservedSpectrum) -> tuple[str, ...]:
 
 def normalize_project_state(state: VibrationalProjectState) -> VibrationalProjectState:
     """Repair portable cross-references around stable, unique spectrum IDs in place."""
-    physical = [*state.raman_spectra, *state.ftir_spectra]
+    physical = state.raman_spectra
     canonical_by_old_id: dict[str, str] = {}
     occupied: set[str] = set()
     for spectrum in physical:
@@ -91,10 +91,8 @@ def normalize_project_state(state: VibrationalProjectState) -> VibrationalProjec
         spectrum.id = canonical
         occupied.add(canonical)
 
-    for spectrum in state.raman_spectra:
-        spectrum.kind = SignalKind.RAMAN
-    for spectrum in state.ftir_spectra:
-        spectrum.kind = SignalKind.FTIR
+        if spectrum.kind == SignalKind.UNKNOWN:
+            spectrum.kind = SignalKind.RAMAN
 
     alias_targets: dict[str, set[str]] = defaultdict(set)
     for spectrum in physical:
@@ -151,4 +149,9 @@ def normalize_project_state(state: VibrationalProjectState) -> VibrationalProjec
             value.spectrum.id = canonical
         profiles[canonical] = value
     state.profile_states = profiles
+    by_key = {}
+    for item in state.working_references:
+        by_key.setdefault(item.candidate.key, item)
+    state.working_references = list(by_key.values())
+    state.visible_working_reference_keys.intersection_update(by_key)
     return state

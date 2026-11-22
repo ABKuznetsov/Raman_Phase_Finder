@@ -10,9 +10,9 @@ from urllib.parse import quote, urlencode
 from urllib.request import HTTPCookieProcessor, HTTPSHandler, Request, build_opener
 import zipfile
 
-from finder_core.cache import app_cache_dir
-from finder_core.data_sources import SourceQuery
-from finder_core.models import CandidateRecord, SignalKind
+from vibrational_finder.core.cache import app_cache_dir
+from vibrational_finder.core.data_sources import SourceQuery
+from vibrational_finder.core.models import CandidateRecord, SignalKind
 from vibrational_finder.band_detection import BandDetectionOptions, detect_bands, extract_reference_band_set
 from vibrational_finder.models import CompoundCandidate, ReferenceBandSet, ReferenceSpectrum, SpectralBand
 from vibrational_finder.services.reference_cache import ReferenceSpectrumCache

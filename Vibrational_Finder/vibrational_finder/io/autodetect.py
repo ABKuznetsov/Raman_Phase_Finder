@@ -7,7 +7,7 @@ from collections.abc import Sequence
 
 import numpy as np
 
-from finder_core.models import SignalKind
+from vibrational_finder.core.models import SignalKind
 from vibrational_finder.models import spectrum_kind
 
 
@@ -28,6 +28,27 @@ def _read_text_sample(path: Path) -> str:
             return stream.read(120_000)
     except OSError:
         return ""
+
+
+def declared_spectrum_units(path: str | Path) -> tuple[str, str]:
+    """Read declared axes for archival cards; do not turn a guess into metadata."""
+    header = _read_text_sample(Path(path))[:20_000].lower().replace("−", "-").replace("⁻¹", "-1")
+    x_unit = ""
+    if re.search(r"\b(?:raman[ _-]+shift|wave[ _-]?number)\b|x\s*units\s*[:=]\s*(?:1/cm|cm\^?-1)", header):
+        x_unit = "cm-1"
+    elif re.search(r"x\s*units\s*[:=]\s*nm\b|^\s*[#;\s]*(?:scattered\s+)?wavelength\b", header, re.M):
+        x_unit = "nm"
+    elif re.search(r"x\s*units\s*[:=]\s*ev\b", header):
+        x_unit = "eV"
+    y_unit = ""
+    for pattern, unit in (
+        (r"\bcounts\b", "counts"), (r"\ba\.?\s*u\.?\b|arbitrary units", "a.u."),
+        (r"\babsorbance\b", "absorbance"), (r"%t\b|transmittance", "%T"),
+    ):
+        if re.search(r"(?:y\s*units\s*[:=]\s*|intensity\s*\(\s*)" + pattern, header):
+            y_unit = unit
+            break
+    return x_unit, y_unit
 
 
 def has_explicit_infrared_metadata(path: Path) -> bool:

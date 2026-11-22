@@ -99,13 +99,17 @@ class FinderActionBar(QWidget):
         self._section_editors[key] = editor
         editor.show()
 
-    def clear_section_editor(self, key: str) -> None:
+    def clear_section_editor(self, key: str, *, collapse: bool = False) -> None:
         editor = self._section_editors.pop(key, None)
         if editor is not None:
             self._preprocessing_hosts[key].layout().removeWidget(editor)
             editor.setParent(None)
             editor.deleteLater()
         self._preprocessing_placeholders[key].show()
+        if collapse:
+            section = self._preprocessing_sections[key]
+            section.toggle.setChecked(False)
+            section._set_expanded(False)
 
     def set_processing_available(self, available: bool, reason: str = "") -> None:
         self.processing_availability_label.setText("" if available else reason)

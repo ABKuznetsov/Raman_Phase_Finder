@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from vibrational_finder.core.models import MatchScore
 from vibrational_finder.models import VibrationalMatchResult
 from vibrational_finder.profile_state import SpectrumProfileState
 from vibrational_finder.project_document import ProjectDocument
@@ -55,28 +56,49 @@ class AcceptedComponentsController:
         had_color = key in self.project.candidate_colors
         self.ensure_color(key)
         changed = changed or not had_color
-        if changed:
+        if existing is None:
             profile.residual_results.clear()
+            profile.saved_gain = None
+            profile.phase_fit = None
             profile.cumulative_unassigned_bands = cumulative_unassigned_bands(profile.selected_results)
+        if changed:
             self.document.mark_changed()
         return existing is None
 
-    def set_visible(self, spectrum_id: str, key: str, visible: bool) -> bool:
-        profile = self.profile(spectrum_id)
-        if all(item.candidate.key != key for item in profile.selected_results):
+    def add_working_reference(self, result: VibrationalMatchResult) -> bool:
+        key = result.candidate.key
+        if any(item.candidate.key == key for item in self.project.working_references):
             return False
-        before = key in profile.visible_selected_candidate_keys
+        self.project.working_references.append(VibrationalMatchResult(
+            candidate=result.candidate, score=MatchScore(), reference_bands=list(result.reference_bands),
+        ))
+        self.project.visible_working_reference_keys.add(key)
+        self.ensure_color(key)
+        self.document.mark_changed()
+        return True
+
+    def selected(self, spectrum_id: str | None) -> tuple[list[VibrationalMatchResult], set[str]]:
+        if spectrum_id is None:
+            return self.project.working_references, self.project.visible_working_reference_keys
+        profile = self.profile(spectrum_id)
+        return profile.selected_results, profile.visible_selected_candidate_keys
+
+    def set_visible(self, spectrum_id: str | None, key: str, visible: bool) -> bool:
+        results, visible_keys = self.selected(spectrum_id)
+        if all(item.candidate.key != key for item in results):
+            return False
+        before = key in visible_keys
         if visible:
-            profile.visible_selected_candidate_keys.add(key)
+            visible_keys.add(key)
         else:
-            profile.visible_selected_candidate_keys.discard(key)
+            visible_keys.discard(key)
         if before != visible:
             self.document.mark_changed()
             return True
         return False
 
-    def set_color(self, spectrum_id: str, key: str, color: str) -> bool:
-        if not any(item.candidate.key == key for item in self.profile(spectrum_id).selected_results):
+    def set_color(self, spectrum_id: str | None, key: str, color: str) -> bool:
+        if not any(item.candidate.key == key for item in self.selected(spectrum_id)[0]):
             return False
         if self.project.candidate_colors.get(key) == color:
             return False
@@ -84,34 +106,44 @@ class AcceptedComponentsController:
         self.document.mark_changed()
         return True
 
-    def remove(self, spectrum_id: str, key: str) -> bool:
-        profile = self.profile(spectrum_id)
-        retained = [item for item in profile.selected_results if item.candidate.key != key]
-        if len(retained) == len(profile.selected_results):
+    def remove(self, spectrum_id: str | None, key: str) -> bool:
+        results, visible_keys = self.selected(spectrum_id)
+        retained = [item for item in results if item.candidate.key != key]
+        if len(retained) == len(results):
             return False
-        profile.selected_results = retained
-        profile.residual_results.clear()
-        profile.visible_selected_candidate_keys.discard(key)
-        profile.cumulative_unassigned_bands = cumulative_unassigned_bands(retained)
+        results[:] = retained
+        visible_keys.discard(key)
+        if spectrum_id is not None:
+            profile = self.profile(spectrum_id)
+            profile.residual_results.clear()
+            profile.saved_gain = None
+            profile.phase_fit = None
+            profile.cumulative_unassigned_bands = cumulative_unassigned_bands(retained)
         self._drop_unused_color(key)
         self.document.mark_changed()
         return True
 
-    def clear(self, spectrum_id: str) -> int:
-        profile = self.profile(spectrum_id)
-        keys = [item.candidate.key for item in profile.selected_results]
+    def clear(self, spectrum_id: str | None) -> int:
+        results, visible_keys = self.selected(spectrum_id)
+        keys = [item.candidate.key for item in results]
         if not keys:
             return 0
-        profile.selected_results.clear()
-        profile.residual_results.clear()
-        profile.visible_selected_candidate_keys.clear()
-        profile.cumulative_unassigned_bands.clear()
+        results.clear()
+        visible_keys.clear()
+        if spectrum_id is not None:
+            profile = self.profile(spectrum_id)
+            profile.residual_results.clear()
+            profile.saved_gain = None
+            profile.phase_fit = None
+            profile.cumulative_unassigned_bands.clear()
         for key in keys:
             self._drop_unused_color(key)
         self.document.mark_changed()
         return len(keys)
 
     def _drop_unused_color(self, key: str) -> None:
+        if any(item.candidate.key == key for item in self.project.working_references):
+            return
         if any(
             result.candidate.key == key
             for profile in self.project.profile_states.values()

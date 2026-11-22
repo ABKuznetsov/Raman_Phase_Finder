@@ -8,9 +8,9 @@ from numbers import Real
 import sqlite3
 import time
 
-from finder_core.chemistry import parse_formula_elements
-from finder_core.data_sources import SourceQuery
-from finder_core.models import CandidateRecord, SignalKind
+from vibrational_finder.core.chemistry import parse_formula_elements
+from vibrational_finder.core.data_sources import SourceQuery
+from vibrational_finder.core.models import CandidateRecord, SignalKind
 from vibrational_finder.models import ReferenceBandSet, SpectralBand
 
 

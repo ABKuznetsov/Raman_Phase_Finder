@@ -4,8 +4,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from finder_core.matching_base import weighted_score
-from finder_core.models import MatchScore, SignalTrace
+from vibrational_finder.core.matching_base import weighted_score
+from vibrational_finder.cancellation import checkpoint
+from vibrational_finder.core.models import MatchScore, SignalTrace
 from vibrational_finder.band_detection import BandDetectionOptions, detect_bands, extract_reference_band_set
 from vibrational_finder.models import CompoundCandidate, ReferenceSpectrum, SpectralBand, VibrationalMatchResult
 from vibrational_finder.preprocessing import PreprocessingOptions, preprocess_spectrum
@@ -173,6 +174,7 @@ def score_candidate(
     observed_processed: SignalTrace | None = None,
     observed_bands: list[SpectralBand] | None = None,
 ) -> VibrationalMatchResult:
+    checkpoint()
     options = options or MatchingOptions()
     reference_band_set = candidate.band_set
     if reference_band_set is None and candidate.reference is not None:

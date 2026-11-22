@@ -5,7 +5,7 @@ from collections.abc import Callable
 from PySide6.QtCore import QObject, Signal
 
 from vibrational_finder.services.source_management import SpectroscopySourceManager
-from vibrational_finder.ui.background_task import BackgroundTaskHandle
+from vibrational_finder.ui.background_task import BackgroundTaskHandle, BackgroundTaskLane
 
 
 class SourceManagementJobController(QObject):
@@ -23,17 +23,20 @@ class SourceManagementJobController(QObject):
         parent: QObject | None = None,
         *,
         handle_factory: Callable[..., BackgroundTaskHandle] = BackgroundTaskHandle,
+        lane: BackgroundTaskLane | None = None,
     ) -> None:
         super().__init__(parent)
         self.manager = manager
         self._handle_factory = handle_factory
+        self._lane = lane if lane is not None else BackgroundTaskLane()
         self._current: BackgroundTaskHandle | None = None
         self._current_context: tuple[str, str] | None = None
         self._handles: list[BackgroundTaskHandle] = []
 
     def start(self, name: str, operation: str, package_key: str | None = None) -> BackgroundTaskHandle:
         self.cancel()
-        task = lambda: self._run(name, operation, package_key)
+        manager = self.manager
+        task = lambda: self._run(manager, name, operation, package_key)
         handle = self._handle_factory(task, self)
         self._current = handle
         self._current_context = (name, operation)
@@ -43,18 +46,19 @@ class SourceManagementJobController(QObject):
         handle.drained.connect(lambda active=handle: self._drained(active))
         self.pending.emit(name, operation)
         self.runningChanged.emit(True)
-        handle.start()
+        self._lane.submit(handle)
         return handle
 
-    def _run(self, name: str, operation: str, package_key: str | None) -> object:
+    @staticmethod
+    def _run(manager: SpectroscopySourceManager, name: str, operation: str, package_key: str | None) -> object:
         if operation == "update":
-            return self.manager.update(name, package_key)
+            return manager.update(name, package_key)
         if operation == "clear":
-            return self.manager.clear(name)
+            return manager.clear(name)
         if operation == "build_index":
-            return self.manager.build_index(name)
+            return manager.build_index(name)
         if operation == "clear_index":
-            return self.manager.clear_index(name)
+            return manager.clear_index(name)
         raise ValueError(f"Unknown source operation: {operation}")
 
     def cancel(self) -> None:
@@ -64,7 +68,7 @@ class SourceManagementJobController(QObject):
         context = self._current_context
         self._current = None
         self._current_context = None
-        handle.cancel()
+        self._lane.cancel(handle)
         if context is not None:
             self.cancelled.emit(*context)
         self.runningChanged.emit(False)

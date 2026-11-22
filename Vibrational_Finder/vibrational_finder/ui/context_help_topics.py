@@ -23,8 +23,8 @@ def resolve_help(window, widget: QWidget, global_pos=None) -> tuple[QWidget, Hel
     toolbar = window.top_toolbar
     direct = {
         toolbar.new_button: _article("projects.new", "New project", "Start an empty Raman project.", "Separate unrelated measurements and interpretations.", "Save the current project first if it contains changes."),
-        toolbar.open_button: _article("projects.open", "Open project", "Open a portable IRFF project.", "Restore measurements, processing, accepted results and display state together.", "Choose an .irff file or open it from Finder."),
-        toolbar.save_button: _article("projects.save", "Save project", "Save the current Raman analysis as IRFF.", "Keep scientific data and reconstruction instructions portable.", "Use Save after changing data, processing or accepted results."),
+        toolbar.open_button: _article("projects.open", "Open project", "Open a portable Raman project.", "Restore measurements, processing, accepted results and display state together.", "Choose an .rpff file."),
+        toolbar.save_button: _article("projects.save", "Save project", "Save the current Raman analysis as .rpff.", "Keep scientific data and reconstruction instructions portable.", "Use Save after changing data, processing or accepted results."),
         toolbar.import_button: _article("projects.import", "Import Raman", "Add measured vibrational spectra to the project.", "Imported spectra are the observations used for processing and search.", "Choose supported Raman text or instrument files."),
         toolbar.match_button: _article("search.identify", "Identify compounds", "Compare the active spectrum with enabled spectroscopy references.", "Candidate scores help rank possible compounds; they are not probabilities.", "Set element restrictions if needed, then run identification."),
         toolbar.bands_button: _article("bands.search", "Band search", "Detect and edit Raman bands before matching.", "Band positions provide a compact representation for reference search.", "Open the band editor, review detected bands, then run the search."),

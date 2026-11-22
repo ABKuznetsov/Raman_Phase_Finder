@@ -1,12 +1,12 @@
 {
   "format": "vibrational-reference",
-  "version": 1,
+  "version": 2,
   "kind": "raman",
   "metadata": {
     "name": "",
     "formula": "",
     "alternative_name": "",
-    "origin": "experimental",
+    "origin": "",
     "laser_nm": "",
     "temperature_K": "",
     "pressure": "",
@@ -22,19 +22,36 @@
     "citation": "",
     "notes": ""
   },
-  "profile": null,
+  "sources": [
+    {
+      "id": "source-1",
+      "type": "unknown",
+      "doi": null,
+      "url": null,
+      "citation": null,
+      "database": null,
+      "record_id": null,
+      "laboratory": null
+    }
+  ],
+  "source_ids": ["source-1"],
+  "profiles": [],
   "bands": [
     {
       "position_cm1": null,
       "intensity": null,
+      "intensity_label": null,
       "fwhm_cm1": null,
+      "uncertainty_cm1": null,
       "mode": "",
       "symmetry": "",
       "assignment": "",
       "polarization": "",
       "orientation": "",
       "confidence": "reported / estimated / inferred / unknown",
-      "comment": "Article page, table, figure, or note"
+      "comment": "Article page, table, figure, or note",
+      "source_ids": [],
+      "profile_id": null
     }
   ]
 }

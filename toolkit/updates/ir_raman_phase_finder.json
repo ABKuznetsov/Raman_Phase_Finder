@@ -10,14 +10,14 @@
       "type": "installer",
       "platform": "macos",
       "url": "https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.0/Raman_Phase_Finder_macOS_1.0.0.pkg",
-      "sha256": "57bb1f447601962df1e722274753596ce6d2bb17f8a5b9144764d0983f9db416",
-      "size_bytes": 5601488
+      "sha256": "ff1d36846a7563b52f529488a10da0cdd00b223ebb8cd06e1d631c27b2abbe83",
+      "size_bytes": 5627743
     }
   ],
   "summary": [
-    "First standalone Raman release.",
-    "Fixed macOS startup by including the plot layer modules in the installer.",
-    "Opens existing Raman projects and retains local reference libraries and preferences.",
-    "Checks for updates after startup using the new Raman Phase Finder repository."
+    "Compare multiple reference cards on the main plot without loading a measured spectrum.",
+    "Save the reference comparison in an RPFF project and export selected cards as RREF or JSON.",
+    "Import or edit a shared reference card through Add reference.",
+    "The refreshed macOS installer keeps version 1.0.0. Download it manually if 1.0.0 is already installed."
   ]
 }

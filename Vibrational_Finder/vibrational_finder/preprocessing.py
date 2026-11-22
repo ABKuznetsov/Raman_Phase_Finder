@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from finder_core.models import SignalTrace
+from vibrational_finder.core.models import SignalTrace
 from vibrational_finder.services.preprocessing_service import estimate_background, remove_narrow_spikes, smooth_spectrum_curve
 
 

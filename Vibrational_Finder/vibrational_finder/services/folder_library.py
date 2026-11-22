@@ -3,10 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 import re
 
-from finder_core.chemistry import formula_contains_elements
-from finder_core.data_sources import SourceQuery
-from finder_core.models import CandidateRecord, SignalKind
-from finder_core.spectral_metadata import spectrum_geometry_metadata
+from vibrational_finder.core.chemistry import formula_contains_elements
+from vibrational_finder.core.data_sources import SourceQuery
+from vibrational_finder.core.models import CandidateRecord, SignalKind
+from vibrational_finder.core.spectral_metadata import spectrum_geometry_metadata
 from vibrational_finder.io import load_xy_spectrum, supported_spectrum_extensions
 from vibrational_finder.io.autodetect import has_explicit_infrared_metadata
 from vibrational_finder.models import CompoundCandidate, ReferenceSpectrum

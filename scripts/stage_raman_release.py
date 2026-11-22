@@ -19,11 +19,10 @@ RUNTIME_FILES = (
 SOURCE_FILES = (
     ".gitignore", "toolkit/updates/ir_raman_phase_finder.json",
     "scripts/build_macos_pkg.command", "scripts/sanitize_macos_pkg.command",
-    "scripts/stage_raman_release.py", "installer/IR_Raman_Phase_Finder.iss",
-    "installer/build_installer.bat", "installer/clean_payload.bat", "installer/README_build_installer.md",
+    "scripts/stage_raman_release.py",
 )
 LEGACY_MODULES = {"apps/ftir_cli.py", "apps/finder_gui.py", "services/cif_structure_source.py", "services/jarvis_source.py"}
-SUBPACKAGES = {"apps", "io", "layers", "plot_export", "services", "ui"}
+SUBPACKAGES = {"apps", "core", "io", "layers", "plot_export", "services", "ui"}
 
 
 def stage(root: Path, target: Path, *, source: bool = False) -> None:
@@ -31,17 +30,14 @@ def stage(root: Path, target: Path, *, source: bool = False) -> None:
         raise ValueError(f"Staging directory must be empty: {target}")
     target.mkdir(parents=True, exist_ok=True)
     paths = {Path(name) for name in (*RUNTIME_FILES, *(SOURCE_FILES if source else ()))}
-    for package in ("finder_core", "vibrational_finder"):
-        base = Path("Vibrational_Finder") / package
-        folders = [base]
-        if package == "vibrational_finder":
-            folders.extend(base / subpackage for subpackage in SUBPACKAGES)
-            paths.update(p.relative_to(root) for p in (root / base / "ui/assets").glob("*.svg"))
-        for folder in folders:
-            paths.update(
-                p.relative_to(root) for p in (root / folder).glob("*.py")
-                if p.relative_to(root / base).as_posix() not in LEGACY_MODULES
-            )
+    base = Path("Vibrational_Finder/vibrational_finder")
+    folders = [base, *(base / subpackage for subpackage in SUBPACKAGES)]
+    paths.update(p.relative_to(root) for p in (root / base / "ui/assets").glob("*.svg"))
+    for folder in folders:
+        paths.update(
+            p.relative_to(root) for p in (root / folder).glob("*.py")
+            if p.relative_to(root / base).as_posix() not in LEGACY_MODULES
+        )
     for relative in sorted(paths):
         original = root / relative
         if not original.is_file() or original.is_symlink() or any(p.is_symlink() for p in original.parents if p != root):

@@ -106,11 +106,10 @@ def describe_gain_bands(
 ) -> GainBandEvidence:
     """Keep shared/ambiguous windows distinct from new measured evidence."""
     paired = {i for i, _, _ in match.pairs}
-    masked = {
-        band.position for band in reference if isfinite(band.position)
-        and (window.measured is None or window.measured[0] <= band.position <= window.measured[1])
-        and any(lo <= band.position <= hi for lo, hi in window.masked)
-    }
+    aligned = (band.position + match.shift for band in reference)
+    masked = {p for p in aligned if isfinite(p)
+              and (window.measured is None or window.measured[0] <= p <= window.measured[1])
+              and any(lo <= p <= hi for lo, hi in window.masked)}
     return GainBandEvidence(
         tuple(sorted(observed[i].position for i in paired)),
         tuple(sorted(masked)),
@@ -124,9 +123,14 @@ def compare_gain_bands(
     use_evidence_confidence: bool = False,
 ) -> GainMatch:
     """Soft two-sided positional coverage with a bounded tolerance per observed band."""
-    refs = [(i, band.position) for i, band in enumerate(reference) if window.includes(band.position)]
+    # A Raman Gain mask lives in measured coordinates. A reference band can
+    # enter or leave it as the whole reference is translated.
+    shifted_window = use_evidence_confidence or bool(window.masked)
+    refs = [(i, band.position) for i, band in enumerate(reference)
+            if (isfinite(band.position) if shifted_window else window.includes(band.position))]
     query = [(i, band) for i, band in enumerate(observed) if isfinite(band.position)]
-    best = GainMatch(0.0, 0.0, (), len(refs))
+    nominal_ref_count = sum(window.includes(p) for _, p in refs) if shifted_window else len(refs)
+    best = GainMatch(0.0, 0.0, (), nominal_ref_count)
     if not refs or not query:
         return best
 
@@ -137,7 +141,7 @@ def compare_gain_bands(
     weighted = weak is not None and bool(weak.any())
     strong_target = min(3, len(query) - int(np.count_nonzero(weak))) if weak is not None else 0
     if strong_target:
-        best = GainMatch(0.0, 0.0, (), len(refs), strong_target)
+        best = GainMatch(0.0, 0.0, (), nominal_ref_count, strong_target)
     if weighted:
         weights = np.where(weak, _WEAK_WEIGHT, 1.)
         tolerances = np.where(weak, np.minimum(2.45 * sigma, 3.0), 2.45 * sigma)
@@ -151,10 +155,27 @@ def compare_gain_bands(
         span_limits = quantiles(positions.tolist(), n=10, method="inclusive")
         if span_limits[-1] > span_limits[0]:
             central_range = (span_limits[0], span_limits[-1])
-    differences = positions[:, None] - np.array([p for _, p in refs])[None, :]
+    ref_positions = np.array([p for _, p in refs])
+    differences = positions[:, None] - ref_positions[None, :]
     steps = np.arange(max(.1, shift_step), max_shift + 1.e-9, max(.1, shift_step)) if min(len(query), len(refs)) >= 2 else []
-    for shift in (0.0, *(s for step in steps for s in (-float(step), float(step)))):
-        delta = np.abs(differences - shift)
+    shifts = (0.0, *(s for step in steps for s in (-float(step), float(step))))
+    eligible_by_shift = None
+    if shifted_window and (window.measured is not None or window.masked):
+        aligned = ref_positions[None, :] + np.asarray(shifts)[:, None]
+        eligible_by_shift = np.ones(aligned.shape, dtype=bool)
+        if window.measured is not None:
+            low, high = window.measured
+            eligible_by_shift &= (aligned >= low) & (aligned <= high)
+        for low, high in window.masked:
+            eligible_by_shift &= (aligned < low) | (aligned > high)
+    all_columns = np.arange(len(refs))
+    for shift_index, shift in enumerate(shifts):
+        eligible_columns = all_columns if eligible_by_shift is None else np.flatnonzero(eligible_by_shift[shift_index])
+        eligible_count = len(eligible_columns)
+        if eligible_count < (2 if shift else 1):
+            continue
+        eligible_differences = differences if eligible_count == len(refs) else differences[:, eligible_columns]
+        delta = np.abs(eligible_differences - shift)
         scaled = delta / sigma[:, None]
         strength = np.where(scaled <= 2.45, np.exp(-.5 * scaled ** 2), 0.)
         if weighted:
@@ -176,7 +197,7 @@ def compare_gain_bands(
         if shift and len(rows) < 2:
             continue
         shift_penalty = np.exp(-.5 * (shift / max(max_shift, .1)) ** 2)
-        quality = float(200 * strength[rows, columns].sum() / (observed_mass + len(refs)) * shift_penalty)
+        quality = float(200 * strength[rows, columns].sum() / (observed_mass + eligible_count) * shift_penalty)
         if weak_only:
             # Even exact weak-only coverage (40/100 before this factor) is tentative.
             quality *= .625
@@ -196,7 +217,9 @@ def compare_gain_bands(
             quality *= .5 + .5 * (covered_span / (high - low))
         if quality > best.quality:
             best = GainMatch(
-                quality, shift, tuple((query[i][0], refs[j][0], float(delta[i, j])) for i, j in zip(rows, columns)), len(refs),
+                quality, shift,
+                tuple((query[i][0], refs[eligible_columns[j]][0], float(delta[i, j])) for i, j in zip(rows, columns)),
+                eligible_count,
                 strong_target,
             )
     return best

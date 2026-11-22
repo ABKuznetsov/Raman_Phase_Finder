@@ -6,6 +6,17 @@ from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtWidgets import QHeaderView, QTableWidget
 
 
+def context_row_keys(table: QTableWidget, clicked_row: int) -> tuple[str, ...]:
+    selected = sorted(index.row() for index in table.selectionModel().selectedRows())
+    if clicked_row not in selected:
+        table.selectRow(clicked_row)
+        selected = [clicked_row]
+    return tuple(
+        str(key) for row in selected if (item := table.item(row, 0)) is not None
+        and (key := item.data(Qt.ItemDataRole.UserRole))
+    )
+
+
 def _normalized(values, count: int) -> list[float] | None:
     try:
         numbers = [float(value) for value in values]

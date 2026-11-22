@@ -13,9 +13,9 @@ from urllib.request import HTTPSHandler, HTTPRedirectHandler, Request, build_ope
 
 import certifi
 
-from finder_core.cache import app_cache_dir
-from finder_core.data_sources import SourceQuery
-from finder_core.models import CandidateRecord, SignalKind, SignalTrace
+from vibrational_finder.core.cache import app_cache_dir
+from vibrational_finder.core.data_sources import SourceQuery
+from vibrational_finder.core.models import CandidateRecord, SignalKind, SignalTrace
 from vibrational_finder.band_detection import BandDetectionOptions, extract_reference_band_set
 from vibrational_finder.models import CompoundCandidate, ReferenceSpectrum, SpectralBand
 from vibrational_finder.preprocessing import preprocess_spectrum

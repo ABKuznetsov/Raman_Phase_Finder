@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from finder_core.models import CandidateRecord, MatchScore, SignalFeature, SignalKind, SignalTrace
+from vibrational_finder.core.models import CandidateRecord, MatchScore, SignalFeature, SignalKind, SignalTrace
 from vibrational_finder.project_series import new_project_object_id
 
 
@@ -35,12 +35,14 @@ class ReferenceBandSet:
 class ReferenceSpectrum(SignalTrace):
     record: CandidateRecord | None = None
     band_set: ReferenceBandSet | None = None
+    card_payload: dict | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(slots=True)
 class CompoundCandidate(CandidateRecord):
     reference: ReferenceSpectrum | None = None
     band_set: ReferenceBandSet | None = None
+    card_payload: dict | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(slots=True)

@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
-from finder_core.chemistry import parse_formula_elements
+from .chemistry import parse_formula_elements
 
 
 class CompositionFilterMode(str, Enum):

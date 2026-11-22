@@ -5,7 +5,7 @@ import importlib.util
 
 import numpy as np
 
-from finder_core.models import SignalKind, SignalTrace
+from vibrational_finder.core.models import SignalKind, SignalTrace
 from vibrational_finder.models import ReferenceBandSet, SpectralBand
 
 try:

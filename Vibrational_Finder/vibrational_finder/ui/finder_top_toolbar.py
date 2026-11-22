@@ -48,7 +48,7 @@ class FinderTopToolbar(QWidget):
         layout.setSpacing(8)
 
         self.new_button = self._button("new", "New project", "Create a project", self.newProjectRequested)
-        self.open_button = self._button("open", "Open project", "Open an IRFF project", self.openProjectRequested)
+        self.open_button = self._button("open", "Open project", "Open a Raman project (.rpff)", self.openProjectRequested)
         self.save_button = self._button("save", "Save", "Save the current project", self.saveProjectRequested)
         self.import_button = self._button("import", "Import data", "Import Raman spectra", self.importRequested)
         self.reference_button = self._button(

@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from finder_core.models import SignalKind
+from vibrational_finder.core.models import SignalKind
 from vibrational_finder.metadata import APP_NAME
 from vibrational_finder.models import ObservedSpectrum
 from vibrational_finder.plot_export.metadata import CanvasLayer, canvas_item_tag
@@ -40,6 +40,7 @@ from vibrational_finder.ui.project_document_actions import ProjectDocumentAction
 from vibrational_finder.ui.project_tree_controller import ProjectTreeController
 from vibrational_finder.ui.sample_metadata_panel import SampleMetadataPanel
 from vibrational_finder.ui.band_information_card import BandInformationCard
+from vibrational_finder.ui.background_task import BackgroundTaskLane
 from vibrational_finder.ui.spectrum_processing_actions import SpectrumProcessingActionsMixin
 from vibrational_finder.ui.system_theme import SystemThemeObserver
 from vibrational_finder.ui.theme import is_dark_theme, window_style
@@ -223,6 +224,7 @@ class SpectroscopyFinderWindow(
 
         self.project_tree_controller = ProjectTreeController(self)
         self.project_tree.active_spectrum_requested.connect(self.set_active_spectrum)
+        self.project_tree.project_selected.connect(self._show_working_references)
         self.project_tree.series_create_requested.connect(self._prompt_create_series)
         self.project_tree.object_rename_requested.connect(self._prompt_rename_object)
         self.project_tree.object_delete_requested.connect(self._prompt_delete_object)
@@ -247,6 +249,8 @@ class SpectroscopyFinderWindow(
         self.top_toolbar.newProjectRequested.connect(lambda: self.request_new_project())
         self.top_toolbar.openProjectRequested.connect(lambda: self.request_open_project())
         self.top_toolbar.saveProjectRequested.connect(lambda: self.request_save_project())
+        self._background_lane = BackgroundTaskLane()
+        self._init_project_file_actions()
         self._init_spectrum_import_actions()
         self._init_spectrum_processing_actions()
         self._init_plot_display_actions()
@@ -319,8 +323,15 @@ class SpectroscopyFinderWindow(
         active_id = self.project.active_spectrum_key
         return next((item for item in self._ordered_spectra() if item.id == active_id), None)
 
-    def set_active_spectrum(self, spectrum_id: str | None) -> None:
+    def _show_working_references(self) -> None:
+        if self.project.working_references and self.active_spectrum() is not None:
+            self._set_search_mode("search", redraw=False)
+            self.set_active_spectrum(None)
+
+    def set_active_spectrum(self, spectrum_id: str | None, *, prepare_gain: bool = True) -> None:
         if spectrum_id != self.project.active_spectrum_key and hasattr(self, "_preview_result"):
+            self._cancel_reference_browse()
+            self._cancel_reference_jobs()
             self._preview_result = None
         if (
             hasattr(self, "processing_controller")
@@ -348,7 +359,7 @@ class SpectroscopyFinderWindow(
             self._refresh_processing_controls()
             self._refresh_band_workspace()
         if hasattr(self, "candidate_workspace"):
-            self._refresh_candidate_workspace()
+            self._refresh_candidate_workspace(prepare_gain=prepare_gain)
             self._refresh_accepted_components_workspace()
 
     def _redraw_active_spectrum(self, *, preserve_view: bool = False, preserve_x_range: bool = False) -> None:
@@ -357,6 +368,8 @@ class SpectroscopyFinderWindow(
         if subtraction is not None:
             derived = replace(spectrum, x=subtraction.x.tolist(), y=subtraction.corrected.tolist())
             primary, overlays = self._display_spectrum(derived), ()
+        elif spectrum is None and self.project.working_references:
+            primary, overlays = None, ()
         else:
             primary, overlays = self._spectra_for_plot(spectrum)
         active_visible = spectrum is not None and primary is not None and primary.id == spectrum.id
@@ -395,6 +408,7 @@ class SpectroscopyFinderWindow(
         }:
             preview = None
         phases_by_spectrum = {}
+        working_legend = []
         normalized = self.plot_control_bar.normalize_checkbox.isChecked()
         originals = observed_by_id(self.project) if normalized and subtraction is None else {}
         for observed, offset in displayed or ((None, 0.0),):
@@ -441,6 +455,9 @@ class SpectroscopyFinderWindow(
             profile = self.project.profile_states.get(observed.id) if observed is not None else None
             results = list(profile.selected_results) if profile is not None else []
             visible_keys = set(profile.visible_selected_candidate_keys) if profile is not None else set()
+            if observed is None and spectrum is None:
+                results = list(self.project.working_references)
+                visible_keys = set(self.project.visible_working_reference_keys)
             accepted = tuple(result for result in results if result.candidate.key in visible_keys)
             preview_key = None
             if (preview is not None and (observed is None or (active_visible and observed is primary))
@@ -460,8 +477,9 @@ class SpectroscopyFinderWindow(
                     and settings.get("layer_unknown_peaks_visible", True)) else None,
                 observed=observed,
                 preview_key=preview_key,
-                preserve_view=primary is not None,
+                preserve_view=primary is not None or (preserve_view and bool(self.project.working_references)),
                 show_profiles=bool(settings.get("layer_phase_profiles_visible", True)),
+                show_preview_profile=self._show_candidate_profile,
                 show_bands=bool(settings.get("layer_phase_ticks_visible", True)),
                 show_peak_markers=bool(settings.get("layer_reference_peak_markers_visible", False)),
                 show_reference_ticks=bool(settings.get("layer_reference_shift_ticks_visible", True)),
@@ -469,16 +487,17 @@ class SpectroscopyFinderWindow(
                 clear_existing=False,
                 fit_markers=not preserve_view,
                 observed_bands=self.project.sample_bands.get(observed.id, ()) if observed is not None else (),
+                relative_reference_profiles=observed is None and spectrum is None and bool(self.project.working_references),
                 **label_options,
             )
-            if observed is not None:
-                entries = phases_by_spectrum.setdefault(observed.id, [])
-                entries.extend(
-                    PhaseLegendEntry(candidate.key, candidate.name or candidate.entry_id,
-                                     self.project.candidate_colors.get(candidate.key, REFERENCE_COLOR),
-                                     drawn_samples.get(candidate.key, ()))
-                    for candidate in (result.candidate for result in accepted)
-                )
+            entries = phases_by_spectrum.setdefault(observed.id, []) if observed is not None else working_legend
+            entries.extend(
+                PhaseLegendEntry(candidate.key, candidate.name or candidate.entry_id,
+                                 self.project.candidate_colors.get(candidate.key, REFERENCE_COLOR),
+                                 drawn_samples.get(candidate.key, ()))
+                for candidate in (result.candidate for result in accepted)
+                if observed is not None or candidate.key in drawn_samples
+            )
         if primary is not None and not preserve_view and any(
             (tag := canvas_item_tag(item)) is not None
             and (tag.layer in {CanvasLayer.REFERENCE_BANDS, CanvasLayer.REFERENCE_TICKS, CanvasLayer.ASSIGNED_BANDS}
@@ -496,6 +515,7 @@ class SpectroscopyFinderWindow(
             self.spectrum_plot, [observed for observed, _ in displayed], phases_by_spectrum,
             settings=settings, multi=self._in_multi_spectra_mode() and subtraction is None,
             on_move=self._remember_spectrum_legend_position,
+            independent_entries=working_legend,
         )
         if not getattr(self, "_band_annotation_layout_wired", False):
             view = self.spectrum_plot.getViewBox()
@@ -652,6 +672,7 @@ class SpectroscopyFinderWindow(
             self.composition_panel.element_table.set_element_state(element, state)
 
     def _store_composition_filter(self) -> None:
+        self._cancel_reference_browse()
         self.project.ui.selected_element_order = list(self.selected_element_order)
         self.project.ui.element_states = dict(self.element_states)
         self.project.ui.exclude_all_other_elements = self.exclude_all_other_elements
@@ -909,12 +930,14 @@ class SpectroscopyFinderWindow(
             self._interface_scale_timer.start(0)
 
     def closeEvent(self, event: QCloseEvent) -> None:  # type: ignore[override]
-        if self.isVisible() and not self._confirm_document_replacement("close the project"):
+        if not self._prepare_project_close():
             event.ignore()
             return
         captured = self.capture_workspace_state()
         self.workspace_preferences.save(captured)
         self._layout_state.save()
+        self._clear_phase_deconvolution()
+        self.phase_subtraction_job_controller.shutdown()
         self._shutdown_analysis_jobs()
         super().closeEvent(event)
 

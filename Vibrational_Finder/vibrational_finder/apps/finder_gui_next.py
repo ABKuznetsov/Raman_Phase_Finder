@@ -12,6 +12,7 @@ from typing import Protocol
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
+from vibrational_finder.io import PORTABLE_PROJECT_SUFFIX
 from vibrational_finder.io.xy_loader import load_raman_spectrum
 from vibrational_finder.models import ObservedSpectrum
 from vibrational_finder.metadata import APP_NAME
@@ -87,9 +88,13 @@ def build_local_project(spectrum_paths: Sequence[str]) -> VibrationalProjectStat
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=APP_NAME)
-    parser.add_argument("spectra", nargs="*")
+    parser.add_argument("files", nargs="*", help="One .rpff project or Raman spectra to import")
     parser.add_argument("--smoke-test", action="store_true")
     args = parser.parse_args(argv)
+    paths = [Path(file) for file in args.files]
+    projects = [path for path in paths if path.suffix.lower() == PORTABLE_PROJECT_SUFFIX]
+    if projects and len(paths) != 1:
+        parser.error("Open one .rpff project at a time; import measurements after opening it.")
     app = QApplication.instance() or QApplication(sys.argv[:1])
     app.setApplicationName(APP_NAME)
     icon_path = Path(__file__).resolve().parents[3] / "icon.png"
@@ -97,10 +102,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         app.setWindowIcon(QIcon(str(icon_path)))
     file_open_handler = ProjectFileOpenHandler(app)
     try:
-        project = build_local_project(args.spectra)
+        project = build_local_project([] if projects else args.files)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     window = SpectroscopyFinderWindow(project, defer_source_settings=True)
+    if projects and args.smoke_test:
+        try:
+            window.open_project_path(projects[0])
+        except (OSError, ValueError) as exc:
+            parser.error(str(exc))
+    if projects and not args.smoke_test:
+        file_open_handler.enqueue_path(projects[0])
     file_open_handler.set_window(window)
     handshake = StartupHandshake.from_environment()
     handshake.mark_prepared()

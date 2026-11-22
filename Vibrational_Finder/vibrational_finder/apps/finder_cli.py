@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import argparse
 
-from finder_core.data_sources import SourceQuery
-from finder_core.export import write_match_table
-from finder_core.models import SignalKind
+from vibrational_finder.core.data_sources import SourceQuery
+from vibrational_finder.core.export import write_match_table
+from vibrational_finder.core.models import SignalKind
 from vibrational_finder.io.xy_loader import load_raman_spectrum
 from vibrational_finder.matching import MatchingOptions, rank_candidates
 from vibrational_finder.metadata import APP_NAME

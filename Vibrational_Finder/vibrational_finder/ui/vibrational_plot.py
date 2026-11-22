@@ -11,7 +11,7 @@ from PySide6.QtCore import QRectF, Qt, Signal
 from PySide6.QtGui import QFont, QPainterPath
 from PySide6.QtWidgets import QLayout, QVBoxLayout, QWidget
 
-from finder_core.models import SignalKind
+from vibrational_finder.core.models import SignalKind
 from vibrational_finder.plot_export.metadata import CanvasLayer, canvas_item_tag, tag_canvas_item
 from vibrational_finder.models import ObservedSpectrum, VibrationalMatchResult
 from vibrational_finder.models import SpectralBand
@@ -595,6 +595,7 @@ def show_reference_layers(
     preview_key: str | None = None,
     preserve_view: bool = True,
     show_profiles: bool = True,
+    show_preview_profile: bool = False,
     show_bands: bool = True,
     show_peak_markers: bool = False,
     show_reference_ticks: bool = False,
@@ -604,6 +605,7 @@ def show_reference_layers(
     clear_existing: bool = True,
     fit_markers: bool = False,
     observed_bands: Sequence[SpectralBand] = (),
+    relative_reference_profiles: bool = False,
 ) -> dict[str, tuple[LegendSample, ...]]:
     old_range = plot.viewRange() if preserve_view else None
     removable_layers = {
@@ -629,8 +631,14 @@ def show_reference_layers(
         is_preview = key == preview_key
         visual_key = f"{observed.id}-{key}" if observed is not None else key
         reference = result.aligned_reference or result.candidate.reference
-        if show_profiles and reference is not None and reference.x and reference.y:
-            y = np.asarray(_reference_display_y(reference.y, observed, profile=True)) + display_offset
+        profile_visible = show_preview_profile if is_preview else show_profiles
+        if profile_visible and reference is not None and reference.x and reference.y:
+            y = np.asarray(_reference_display_y(reference.y, observed, profile=True), dtype=float)
+            if relative_reference_profiles and observed is None:
+                finite_y = y[np.isfinite(y)]
+                if finite_y.size:
+                    y = (y - finite_y.min()) / (float(np.ptp(finite_y)) or 1.0)
+            y = y + display_offset
             curve = pg.PlotCurveItem(
                 reference.x, y,
                 pen=pg.mkPen(color, width=1.4, style=Qt.PenStyle.DashLine if is_preview else Qt.PenStyle.SolidLine),
@@ -711,7 +719,7 @@ def show_reference_layers(
                     f"reference-bands-{visual_key}", exportable=not is_preview, ignore_bounds=not fit_markers,
                 )
                 _record_legend_samples(samples_by_phase, key, LegendSample("tick"))
-            if show_peak_markers and not nominal_preview:
+            if show_peak_markers and (not nominal_preview or (measured is None and not is_preview)):
                 dots = pg.ScatterPlotItem(
                     positions, heights, symbol="o", size=8, brush=pg.mkBrush(color),
                     pen=pg.mkPen("#ffffff", width=1), useCache=False,
@@ -721,7 +729,7 @@ def show_reference_layers(
                     dots, layer=CanvasLayer.ASSIGNED_BANDS, owner_id=key,
                     object_id=f"reference-markers-{visual_key}", exportable=not is_preview,
                 )
-                plot.addItem(dots, ignoreBounds=True)
+                plot.addItem(dots, ignoreBounds=measured is not None or preserve_view)
                 _record_legend_samples(samples_by_phase, key, LegendSample("marker"))
             if (show_mode_labels or show_assignment_labels) and (not nominal_preview or measured is None):
                 for index, x, y in zip(np.flatnonzero(valid), positions, label_y, strict=True):

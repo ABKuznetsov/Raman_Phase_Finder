@@ -89,7 +89,6 @@ class ProjectTreeController(QObject):
         if spectrum is None:
             return False
         self.project.raman_spectra = [item for item in self.project.raman_spectra if item.id != object_id]
-        self.project.ftir_spectra = [item for item in self.project.ftir_spectra if item.id != object_id]
         self.project.spectrum_order_ids = [item for item in self.project.spectrum_order_ids if item != object_id]
         for series in self.project.series:
             series.remove_spectrum(object_id)

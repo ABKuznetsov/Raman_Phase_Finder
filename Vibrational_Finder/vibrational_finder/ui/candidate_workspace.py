@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Iterable
-from math import isfinite
-import re
+from collections.abc import Iterable, Mapping
+from dataclasses import replace
 
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QActionGroup, QBrush, QColor
@@ -20,14 +19,15 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from finder_core.models import CandidateRecord, SignalKind
+from vibrational_finder.core.models import CandidateRecord, MatchScore
+from vibrational_finder.core.spectral_metadata import excitation_wavelength_nm as _laser_nm
 
 from vibrational_finder.raman_gain import (
-    GainWindow, RamanPeakPriority, compare_gain_bands, describe_gain_bands, gain_band_is_strong,
+    GainMatch, GainWindow, RamanPeakPriority, compare_gain_bands, describe_gain_bands, gain_band_is_strong,
     priority_score, raman_priority_weights,
 )
 from vibrational_finder.models import SpectralBand, VibrationalMatchResult
-from vibrational_finder.ui.managed_table import ManagedColumnTable
+from vibrational_finder.ui.managed_table import ManagedColumnTable, context_row_keys
 from vibrational_finder.ui.phase_color_delegate import PhaseColorDelegate
 
 
@@ -35,21 +35,6 @@ _NUMERIC_ROLE = Qt.ItemDataRole.UserRole + 1
 _COMPOUND_COLUMN = 2
 _LASER_COLUMN, _MATCH_COLUMN, _GAIN_COLUMN = 3, 4, 5
 _UNSPECIFIED = "unspecified"
-
-
-def _laser_nm(record: CandidateRecord) -> float | None:
-    if record.kind == SignalKind.FTIR:
-        return None
-    for key in ("laser_nm", "excitation_wavelength_nm", "laser_wavelength_nm"):
-        value = re.fullmatch(
-            r"\s*(\d+(?:[.,]\d+)?)\s*(?:nm)?\s*(?:\([^()\d]*\))?\s*",
-            str(record.metadata.get(key, "")), re.I,
-        )
-        if value:
-            wavelength = float(value[1].replace(",", "."))
-            if isfinite(wavelength) and wavelength > 0:
-                return wavelength
-    return None
 
 
 class NumericTableItem(QTableWidgetItem):
@@ -80,6 +65,7 @@ class CandidateWorkspace(QWidget):
     cancelRequested = Signal()
     previewRequested = Signal(str)
     acceptRequested = Signal(str)
+    exportRequested = Signal(object, str)
 
     HEADERS = ("Source", "Formula", "Compound", "Laser (nm)", "Match", "Gain")
     HEADER_TOOLTIPS = (
@@ -97,6 +83,9 @@ class CandidateWorkspace(QWidget):
         super().__init__(parent)
         self.setObjectName("candidatePanel")
         self._results: dict[str, VibrationalMatchResult] = {}
+        self._provisional_gain: dict[str, GainMatch] = {}
+        self._prepared_gain: Mapping[str, GainMatch] | None = None
+        self._ranked_gain = False
         self._records: dict[str, CandidateRecord] = {}
         self._excitation_by_key: dict[str, float | None] = {}
         self._excitation_filter: float | str | None = None
@@ -138,6 +127,12 @@ class CandidateWorkspace(QWidget):
         status_row.addWidget(self.status_label, 1)
         self.score_mode_label = QLabel("Match")
         status_row.addWidget(self.score_mode_label)
+        self.browse_cancel_button = QPushButton("Cancel")
+        self.browse_cancel_button.setObjectName("candidateBrowseCancelButton")
+        self.browse_cancel_button.setToolTip("Cancel database search and keep the last completed results")
+        self.browse_cancel_button.hide()
+        self.browse_cancel_button.clicked.connect(self.cancelRequested)
+        status_row.addWidget(self.browse_cancel_button)
         layout.addWidget(self.status_bar)
         self.table = ManagedColumnTable(
             0, len(self.HEADERS), default_proportions=(0.15, 0.16, 0.31, 0.18, 0.10, 0.10)
@@ -150,6 +145,7 @@ class CandidateWorkspace(QWidget):
         self.table.verticalHeader().setDefaultSectionSize(26)
         self.table.setSortingEnabled(True)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
@@ -197,15 +193,45 @@ class CandidateWorkspace(QWidget):
         key = self.candidate_key_at(row)
         if not key:
             return
-        self.table.selectRow(row)
+        keys = context_row_keys(self.table, row)
         self._candidate_menu.clear()
         self._candidate_menu.addAction("Preview reference", lambda: self.previewRequested.emit(key))
         accept = self._candidate_menu.addAction("Add to working set", lambda: self.acceptRequested.emit(key))
         accept.setEnabled(key not in self._accepted_keys)
+        self._candidate_menu.addSeparator()
+        self._candidate_menu.addAction("Export reference as RREF…",
+                                       lambda: self.exportRequested.emit(keys, ".rref"))
+        self._candidate_menu.addAction("Export reference as JSON…",
+                                       lambda: self.exportRequested.emit(keys, ".json"))
         self._candidate_menu.popup(self.table.viewport().mapToGlobal(position))
 
-    def result_for_key(self, key: str) -> VibrationalMatchResult | None:
-        return self._results.get(key)
+    def result_for_key(self, key: str, *, align_for_gain: bool = True) -> VibrationalMatchResult | None:
+        result = self._results.get(key)
+        if not align_for_gain or result is None or self._ranked_gain or key in self._accepted_keys or not self._gain_bands:
+            return result
+        gain = self._gain_match(result)
+        if gain is None:
+            return result
+        bands = self._gain_bands
+        matched = {i for i, _, _ in gain.pairs}
+        reference = result.candidate.reference
+        aligned = replace(reference, x=[value + gain.shift for value in reference.x]) if reference is not None else None
+        if aligned is None and result.aligned_reference is not None:
+            reference = result.aligned_reference
+            delta = gain.shift - result.score.x_shift
+            aligned = replace(reference, x=[value + delta for value in reference.x])
+        return replace(
+            result,
+            score=MatchScore(
+                combined=priority_score(gain.quality, gain, self._gain_priority_weights),
+                position=gain.quality, coverage=100. * len(matched) / len(bands),
+                matched_features=len(matched), total_features=len(bands), x_shift=gain.shift,
+            ),
+            observed_bands=bands,
+            unassigned_bands=[band for i, band in enumerate(bands) if i not in matched],
+            aligned_reference=aligned,
+            matched_peak_pairs=[(j, bands[i].position) for i, j, _ in gain.pairs],
+        )
 
     def record_for_key(self, key: str) -> CandidateRecord | None:
         return self._records.get(key)
@@ -264,13 +290,16 @@ class CandidateWorkspace(QWidget):
         gain_bands: list[SpectralBand] | None = None,
         gain_window: GainWindow | None = None,
         peak_priority: RamanPeakPriority = RamanPeakPriority.OFF,
+        prepared_matches: Mapping[str, GainMatch] | None = None,
+        refresh_scores: bool = True,
     ) -> None:
         remaining = None if remaining_positions is None else set(remaining_positions)
         accepted = set(accepted_keys)
         window = gain_window or GainWindow()
         weights = raman_priority_weights(gain_bands or (), window, peak_priority)
-        if (remaining, accepted, gain_bands, window, weights) == (
-            self._remaining_positions, self._accepted_keys, self._gain_bands, self._gain_window, self._gain_priority_weights,
+        if (remaining, accepted, gain_bands, window, weights, prepared_matches) == (
+            self._remaining_positions, self._accepted_keys, self._gain_bands, self._gain_window,
+            self._gain_priority_weights, self._prepared_gain,
         ):
             return
         stage_changed = bool(accepted) != bool(self._accepted_keys)
@@ -278,6 +307,8 @@ class CandidateWorkspace(QWidget):
         self._gain_bands = gain_bands
         self._gain_window = window
         self._gain_priority_weights = weights
+        self._prepared_gain = prepared_matches
+        self._provisional_gain.clear()
         if accepted and gain_bands is not None and len(gain_bands) == 1:
             self.score_mode_label.setText("Gain · 1 band left · tentative")
         else:
@@ -289,9 +320,11 @@ class CandidateWorkspace(QWidget):
             self.table.horizontalHeaderItem(_MATCH_COLUMN).setToolTip(
                 "Match is inactive while phases are accepted." if accepted else self.HEADER_TOOLTIPS[_MATCH_COLUMN]
             )
-        if not self._results:
+        if not self._results or not refresh_scores:
             if stage_changed:
-                self.table.sortItems(_GAIN_COLUMN if accepted else _MATCH_COLUMN, Qt.SortOrder.DescendingOrder)
+                self.table.horizontalHeader().setSortIndicator(
+                    _GAIN_COLUMN if accepted else _MATCH_COLUMN, Qt.SortOrder.DescendingOrder,
+                )
             return
         sorting = self.table.isSortingEnabled()
         self.table.setSortingEnabled(False)
@@ -311,6 +344,32 @@ class CandidateWorkspace(QWidget):
         self._set_row_item(row, _MATCH_COLUMN, match, key)
         self._set_row_item(row, _GAIN_COLUMN, self._gain_item(result), key)
 
+    def _gain_match(self, result: VibrationalMatchResult) -> GainMatch | None:
+        if not self._gain_bands or not result.reference_bands or result.candidate.key in self._accepted_keys:
+            return None
+        if self._ranked_gain:
+            # Reuse the worker's assignment, not a second search with different inputs.
+            index = {band.position: i for i, band in enumerate(self._gain_bands)}
+            shift = result.score.x_shift
+            pairs = tuple(
+                (index[position], j, abs(position - result.reference_bands[j].position - shift))
+                for j, position in (result.matched_peak_pairs or ())
+                if position in index and 0 <= j < len(result.reference_bands)
+            )
+            return GainMatch(
+                result.score.position, shift, pairs,
+                sum(self._gain_window.includes(band.position + shift) for band in result.reference_bands),
+                min(3, sum(gain_band_is_strong(band) for band in self._gain_bands)),
+            )
+        key = result.candidate.key
+        if self._prepared_gain is not None:
+            return self._prepared_gain.get(key)
+        if key not in self._provisional_gain:
+            self._provisional_gain[key] = compare_gain_bands(
+                self._gain_bands, result.reference_bands, window=self._gain_window, use_evidence_confidence=True,
+            )
+        return self._provisional_gain[key]
+
     def _gain_item(self, result: VibrationalMatchResult | None) -> NumericTableItem:
         remaining = self._remaining_positions
         if remaining is None or result is None:
@@ -319,12 +378,11 @@ class CandidateWorkspace(QWidget):
         if self._gain_bands is not None:
             if not remaining or not result.reference_bands:
                 return self._number(None)
-            gain = None if accepted else compare_gain_bands(
-                self._gain_bands, result.reference_bands, window=self._gain_window, use_evidence_confidence=True,
-            )
+            gain = self._gain_match(result)
             hits = len(gain.pairs) if gain is not None else 0
             item = NumericTableItem(f"{hits} / {len(remaining)}")
-            score = priority_score(gain.quality, gain, self._gain_priority_weights) if gain is not None else 0.
+            score = (result.score.combined if self._ranked_gain
+                     else priority_score(gain.quality, gain, self._gain_priority_weights)) if gain is not None else 0.
             item.setData(_NUMERIC_ROLE, score)
             if gain is not None:
                 tip = f"Positional Gain: {gain.quality:.1f} / 100 · {gain.eligible_reference_count} eligible reference bands"
@@ -365,6 +423,8 @@ class CandidateWorkspace(QWidget):
 
     def set_records(self, records: list[CandidateRecord]) -> None:
         self._results.clear()
+        self._provisional_gain.clear()
+        self._ranked_gain = False
         self._records = {record.key: record for record in records}
         self._refresh_table_records()
         self.status_label.set_routine_text(f"{len(records)} reference{'s' if len(records) != 1 else ''}")
@@ -372,11 +432,13 @@ class CandidateWorkspace(QWidget):
         self.match_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
 
-    def set_residual_results(self, results: list[VibrationalMatchResult]) -> None:
-        self._set_results(results, prefix="Next component — ")
+    def set_residual_results(self, results: list[VibrationalMatchResult], *, position_only: bool = False) -> None:
+        self._set_results(results, prefix="Next component — ", ranked_gain=position_only)
 
-    def _set_results(self, results: list[VibrationalMatchResult], *, prefix: str) -> None:
+    def _set_results(self, results: list[VibrationalMatchResult], *, prefix: str, ranked_gain: bool = False) -> None:
         self._records.clear()
+        self._provisional_gain.clear()
+        self._ranked_gain = ranked_gain
         self._results = {result.candidate.key: result for result in results}
         self._refresh_table_records()
         self.status_label.set_routine_text(f"{prefix}{len(results)} candidate{'s' if len(results) != 1 else ''}")
@@ -444,6 +506,19 @@ class CandidateWorkspace(QWidget):
         self._set_status_busy(True)
         self.match_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
+
+    def set_browse_pending(self) -> None:
+        self.status_label.setText("Searching databases…")
+        self._set_status_busy(True)
+        self.table.setEnabled(False)
+        self.browse_cancel_button.show()
+
+    def finish_browse(self, message: str = "") -> None:
+        self.browse_cancel_button.hide()
+        self.table.setEnabled(True)
+        self._set_status_busy(False)
+        if message:
+            self.status_label.setText(message)
 
     def set_failed(self, message: str) -> None:
         self.status_label.setText(f"{'Gain' if self._accepted_keys else 'Match'} failed: {message}")

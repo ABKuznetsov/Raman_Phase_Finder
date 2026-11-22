@@ -175,14 +175,15 @@ class _LegendLayer:
         self.view.sigRangeChanged.connect(self.layout)
         self.view.sigResized.connect(self.layout)
 
-    def set_contents(self, spectra, phases_by_spectrum, settings, *, multi, on_move) -> None:
+    def set_contents(self, spectra, phases_by_spectrum, settings, *, multi, on_move, independent_entries) -> None:
         for item in [self.common, *(box.item for box in self.boxes.values())]:
             if item is not None and item in self.plot.plotItem.items:
                 self.plot.removeItem(item)
         self.boxes.clear()
         self.traces.clear()
         self.common = None
-        self.common_position = _saved_position(settings.get("multi_common_legend_position"))
+        key = "reference_legend_position" if independent_entries else "multi_common_legend_position"
+        self.common_position = _saved_position(settings.get(key))
 
         names_visible = bool(settings.get("legend_visible", True))
         chosen = QColor(str(settings.get("legend_color", "#111111")))
@@ -206,7 +207,9 @@ class _LegendLayer:
                 traces.setdefault(tag.owner_id, item)
             elif tag.layer == CanvasLayer.OBSERVED or (tag.object_id or "").startswith("subtraction-residual-"):
                 traces[tag.owner_id] = item
-        common: dict[str, PhaseLegendEntry] = {}
+        common: dict[str, PhaseLegendEntry] = {
+            entry.key: entry for entry in independent_entries if names_visible
+        }
         for spectrum in spectra:
             trace = traces.get(spectrum.id)
             entries = phases_by_spectrum.get(spectrum.id, ())
@@ -361,8 +364,10 @@ def show_spectrum_legends(
     settings: Mapping[str, object],
     multi: bool = False,
     on_move: Callable[[str | None, float, float], None] | None = None,
+    independent_entries: Sequence[PhaseLegendEntry] = (),
 ) -> None:
     layer = getattr(plot, "_spectrum_legend_layer", None)
     if layer is None:
         layer = plot._spectrum_legend_layer = _LegendLayer(plot)
-    layer.set_contents(spectra, phases_by_spectrum, settings, multi=multi, on_move=on_move)
+    layer.set_contents(spectra, phases_by_spectrum, settings, multi=multi, on_move=on_move,
+                       independent_entries=independent_entries)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-from finder_core.models import SignalTrace
+from .models import SignalTrace
 
 
 def write_match_table(path: str | Path, rows: list[dict[str, object]]) -> None:

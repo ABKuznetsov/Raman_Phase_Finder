@@ -3,8 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, Protocol
 
-from finder_core.data_sources import SourceQuery
-from finder_core.models import CandidateRecord, SignalTrace
+from vibrational_finder.core.data_sources import SourceQuery
+from vibrational_finder.cancellation import checkpoint
+from vibrational_finder.core.models import CandidateRecord, SignalTrace
 from vibrational_finder.band_detection import BandDetectionOptions, detect_bands
 from vibrational_finder.matching import MatchingOptions, rank_candidates
 from vibrational_finder.models import CompoundCandidate, ReferenceSpectrum, SpectralBand, VibrationalMatchResult
@@ -88,6 +89,7 @@ class StagedReferenceSearchService:
         self._record_sources.clear()
         self._source_failures.clear()
         for source in self.sources:
+            checkpoint()
             try:
                 source_records = self._source_shortlist(
                     source, query, observed_bands, limit=shortlist_per_source, fallback_limit=fallback_limit,
@@ -106,6 +108,7 @@ class StagedReferenceSearchService:
         sources_by_name = {source.name: source for source in self.sources}
         candidates: list[CompoundCandidate] = []
         for record in records:
+            checkpoint()
             source = self._record_sources.get(record.key) or sources_by_name.get(record.source)
             if source is None:
                 continue

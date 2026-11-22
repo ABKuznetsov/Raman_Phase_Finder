@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from finder_core.cache import app_cache_dir
-from finder_core.chemistry import formula_contains_elements
-from finder_core.data_sources import SourceQuery
-from finder_core.models import CandidateRecord, SignalKind
+from vibrational_finder.core.cache import app_cache_dir
+from vibrational_finder.core.chemistry import formula_contains_elements
+from vibrational_finder.core.data_sources import SourceQuery
+from vibrational_finder.core.models import CandidateRecord, SignalKind
 from vibrational_finder.band_detection import BandDetectionOptions, detect_bands
 from vibrational_finder.models import (
     CompoundCandidate,
@@ -16,11 +16,20 @@ from vibrational_finder.models import (
     spectrum_kind,
 )
 from vibrational_finder.services.reference_cache import ReferenceSpectrumCache
+from vibrational_finder.services.reference_card_io import is_raman_shift_unit, provenance_label, reference_profiles
 from vibrational_finder.services.user_reference_store import UserReferenceStore
 
 
 USER_REFERENCE_BAND_RECIPE_VERSION = "user-reference-manual-lines-v1"
 USER_LIBRARY_NAME = "User Library"
+
+
+def _searchable_profile(payload: dict) -> dict:
+    if payload.get("version", 1) == 1:
+        # Historical cards already carried numeric Raman-shift profiles.
+        profile = payload.get("profile") or {}
+        return profile if not profile.get("x_unit") or is_raman_shift_unit(profile.get("x_unit")) else {}
+    return next((profile for profile in reference_profiles(payload) if is_raman_shift_unit(profile.get("x_unit"))), {})
 
 
 def user_reference_root() -> Path:
@@ -79,21 +88,27 @@ class EditableReferenceSource:
         for card_id, path, fallback, payload in self._card_payloads():
             metadata = dict(payload.get("metadata") or {})
             kind = spectrum_kind(payload.get("kind") or metadata.get("method"))
+            profile = _searchable_profile(payload)
+            conditions = profile.get("conditions") or {}
+            if conditions.get("laser_nm") not in (None, ""):
+                metadata["laser_nm"] = conditions["laser_nm"]
+            origin = metadata.get("origin") or ("experimental" if payload.get("version", 1) == 1 else "unknown")
             entry_id = str(payload.get("entry_id") or fallback)
             key = f"UserReference:{card_id}:{kind.value}"
             record = CandidateRecord(
                 key=key,
                 source=self.name,
                 entry_id=entry_id,
-                name=str(metadata.get("name") or "Untitled reference"),
+                name=str(metadata.get("name") or metadata.get("formula") or "Untitled reference"),
                 formula=str(metadata.get("formula") or ""),
                 kind=kind,
                 metadata={
                     **{str(k): str(v) for k, v in metadata.items() if v is not None},
                     "original_source": str(payload.get("source") or self.name),
+                    "reference_provenance": str(provenance_label(payload)),
                     "path": str(path),
-                    "origin": str(metadata.get("origin") or "experimental"),
-                    "library_type": str(metadata.get("origin") or "experimental"),
+                    "origin": str(origin),
+                    "library_type": str(origin),
                     "compound_key": str(payload.get("compound_key") or f"UserReference:{entry_id}"),
                 },
             )
@@ -200,7 +215,7 @@ class EditableReferenceSource:
                     polarization=str(item.get("polarization") or ""),
                     orientation=str(item.get("orientation") or ""),
                     source_comment=str(item.get("comment") or ""),
-                    confidence=float(item.get("confidence_value") or 1.0),
+                    confidence=float(item["confidence_value"]) if item.get("confidence_value") not in (None, "") else 1.0,
                 )
             )
         scale = max((band.intensity for band in bands), default=0.0)
@@ -218,15 +233,18 @@ class EditableReferenceSource:
 
     def load_spectrum(self, candidate: CandidateRecord) -> ReferenceSpectrum:
         payload = self._payloads[candidate.key]
-        profile = payload.get("profile") or {}
+        profile = _searchable_profile(payload)
         spectrum = ReferenceSpectrum(
             x=[float(value) for value in profile.get("x") or []],
             y=[float(value) for value in profile.get("y") or []],
             kind=candidate.kind,
             name=candidate.name,
             source_path=str(candidate.metadata.get("path") or ""),
+            x_unit="cm-1",
+            y_unit=str(profile.get("y_unit") or ("a.u." if payload.get("version", 1) == 1 else "")),
             record=candidate,
             band_set=self._band_set(candidate),
+            card_payload=payload,
         )
         return spectrum
 
@@ -259,6 +277,7 @@ class EditableReferenceSource:
                     metadata=dict(record.metadata),
                     reference=spectrum if has_profile else None,
                     band_set=spectrum.band_set,
+                    card_payload=spectrum.card_payload,
                 )
             )
         return candidates

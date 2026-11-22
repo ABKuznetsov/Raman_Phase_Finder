@@ -4,12 +4,13 @@ from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Protocol
 
-from finder_core.data_sources import SourceQuery
-from finder_core.models import CandidateRecord, SignalKind
+from vibrational_finder.core.data_sources import SourceQuery
+from vibrational_finder.cancellation import JobCancelled, checkpoint
+from vibrational_finder.core.models import CandidateRecord, SignalKind
 from vibrational_finder.band_detection import BandDetectionOptions, detect_bands
 from vibrational_finder.matching import MatchingOptions, rank_candidates
 from vibrational_finder.models import CompoundCandidate, ObservedSpectrum, ReferenceSpectrum, SpectralBand, VibrationalMatchResult
-from vibrational_finder.preprocessing import preprocess_spectrum
+from vibrational_finder.preprocessing import PreprocessingOptions, preprocess_spectrum
 from vibrational_finder.raman_gain import RamanPeakPriority
 from vibrational_finder.services.primary_raman_search import rank_raman_index
 from vibrational_finder.services.staged_search import ReferenceSearchSource, StagedReferenceSearchService
@@ -62,6 +63,7 @@ class CandidateSearchService:
         observed_bands: list[SpectralBand] | None = None,
         prefilter_bands: list[SpectralBand] | None = None,
     ) -> CandidateSearchResult:
+        checkpoint()
         options = options or CandidateSearchOptions()
         matching = options.matching_options
         for_gain = matching.position_only
@@ -70,7 +72,11 @@ class CandidateSearchService:
                 detection = matching.band_detection or BandDetectionOptions(
                     backend="scipy", min_prominence=0.04, min_width_cm1=2.0,
                 )
-                observed_bands = detect_bands(preprocess_spectrum(observed, matching.preprocessing), detection)
+                # Use a baseline-corrected copy for primary Match. Smoothing
+                # can blur close or narrow Raman bands, and is not part of this recipe.
+                preprocessing = (matching.preprocessing if for_gain
+                                 else PreprocessingOptions(baseline_method="arpls"))
+                observed_bands = detect_bands(preprocess_spectrum(observed, preprocessing), detection)
             ranked = rank_raman_index(
                 self.sources, query, observed, observed_bands, limit=options.shortlist_per_source,
                 max_shift=matching.max_shift_cm1, refine_profiles=options.refine_raman_profiles,
@@ -133,12 +139,15 @@ class CandidateSearchService:
         candidates: list[CompoundCandidate] = []
         failures: dict[str, str] = {}
         for source in self.sources:
+            checkpoint()
             try:
                 load_candidates = getattr(source, "load_candidates", None)
                 if callable(load_candidates):
                     candidates.extend(self._call_load_candidates(load_candidates, query, observed, observed_bands, limit))
                     continue
                 candidates.extend(self._load_records(source, query, limit))
+            except JobCancelled:
+                raise
             except Exception as exc:
                 name = str(getattr(source, "name", type(source).__name__))
                 failures[name] = f"{type(exc).__name__}: {exc}"
@@ -168,6 +177,7 @@ class CandidateSearchService:
     def _load_records(source, query: SourceQuery, limit: int) -> list[CompoundCandidate]:
         candidates: list[CompoundCandidate] = []
         for record in list(source.search(query))[:limit]:
+            checkpoint()
             try:
                 reference = source.load_spectrum(record)
             except Exception:
@@ -183,6 +193,7 @@ class CandidateSearchService:
                     metadata=dict(record.metadata),
                     reference=reference if reference.x and reference.y else None,
                     band_set=reference.band_set,
+                    card_payload=reference.card_payload,
                 )
             )
         return candidates

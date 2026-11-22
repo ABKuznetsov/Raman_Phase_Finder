@@ -3,9 +3,9 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-from finder_core.data_sources import SourceQuery
-from finder_core.chemistry import formula_contains_elements
-from finder_core.models import CandidateRecord, SignalKind
+from vibrational_finder.core.data_sources import SourceQuery
+from vibrational_finder.core.chemistry import formula_contains_elements
+from vibrational_finder.core.models import CandidateRecord, SignalKind
 from vibrational_finder.io.xy_loader import load_xy_spectrum
 from vibrational_finder.models import CompoundCandidate, CompoundSpectrumSet, ReferenceSpectrum, spectrum_kind
 

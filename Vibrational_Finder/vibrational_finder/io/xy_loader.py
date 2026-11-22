@@ -8,7 +8,7 @@ import xml.etree.ElementTree as ET
 
 import numpy as np
 
-from finder_core.models import SignalKind
+from vibrational_finder.core.models import SignalKind
 from vibrational_finder.io.autodetect import guess_spectrum_metadata, has_explicit_infrared_metadata
 from vibrational_finder.models import ObservedSpectrum, ReferenceSpectrum, spectrum_kind
 

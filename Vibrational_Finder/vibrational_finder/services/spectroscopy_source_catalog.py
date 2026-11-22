@@ -4,9 +4,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Iterable
 
-from finder_core.cache import app_cache_dir
-from finder_core.data_sources import SourceQuery
-from finder_core.models import CandidateRecord, SignalKind
+from vibrational_finder.cancellation import JobCancelled, checkpoint
+from vibrational_finder.core.cache import app_cache_dir
+from vibrational_finder.core.data_sources import SourceQuery
+from vibrational_finder.core.models import CandidateRecord, SignalKind
 
 from vibrational_finder.models import CompoundCandidate, ReferenceSpectrum
 from vibrational_finder.project_state import ProjectUiState, VibrationalProjectState
@@ -34,6 +35,24 @@ class SourceDescriptor:
     remote_url: str = ""
     rest_connection: RestConnection | None = None
     local_cache_subdir: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class CatalogSourceHandle:
+    catalog: SpectroscopySourceCatalog
+    descriptor: SourceDescriptor
+
+    @property
+    def name(self) -> str:
+        return self.descriptor.name
+
+    def open(self) -> Any:
+        checkpoint()
+        if self.catalog._descriptors.get(self.name) is not self.descriptor:
+            raise RuntimeError(f"{self.name} was removed or reconfigured")
+        source = self.catalog.source(self.name)
+        checkpoint()
+        return source
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +149,7 @@ class SpectroscopySourceCatalog:
     _descriptors: dict[str, SourceDescriptor] = field(init=False, default_factory=dict)
     _instances: dict[str, Any] = field(init=False, default_factory=dict)
     _failures: dict[str, str] = field(init=False, default_factory=dict)
+    _refresh_revisions: dict[str, int] = field(init=False, default_factory=dict)
 
     def __post_init__(self) -> None:
         initial = default_source_descriptors() if self.descriptors is None else list(self.descriptors)
@@ -176,17 +196,26 @@ class SpectroscopySourceCatalog:
         self.ui_state.enabled_sources[name] = bool(enabled)
 
     def _instance(self, name: str) -> Any | None:
-        if name in self._instances:
-            return self._instances[name]
+        instance = self._instances.get(name)
+        if instance is not None:
+            return instance
         if name in self._failures:
             return None
-        try:
-            instance = self._descriptors[name].factory()
-        except Exception as exc:
-            self._failures[name] = f"{type(exc).__name__}: {exc}"
+        descriptor = self._descriptors.get(name)
+        if descriptor is None:
             return None
-        self._instances[name] = instance
-        return instance
+        revision = self._refresh_revisions.get(name, 0)
+        try:
+            instance = descriptor.factory()
+        except JobCancelled:
+            raise
+        except Exception as exc:
+            if self._descriptors.get(name) is descriptor and revision == self._refresh_revisions.get(name, 0):
+                self._failures[name] = f"{type(exc).__name__}: {exc}"
+            return None
+        if self._descriptors.get(name) is not descriptor or revision != self._refresh_revisions.get(name, 0):
+            return None
+        return self._instances.setdefault(name, instance)
 
     def source(self, name: str) -> Any:
         """Return one lazily constructed adapter through a stable public boundary."""
@@ -210,6 +239,16 @@ class SpectroscopySourceCatalog:
             if source is not None:
                 sources.append(source)
         return sources
+
+    def enabled_handles(self, kind: SignalKind = SignalKind.UNKNOWN) -> tuple[CatalogSourceHandle, ...]:
+        """Capture the selected source identities without touching files or databases."""
+        if kind not in {SignalKind.RAMAN, SignalKind.UNKNOWN}:
+            return ()
+        return tuple(
+            CatalogSourceHandle(self, descriptor)
+            for name, descriptor in self._descriptors.items()
+            if self.ui_state.enabled_sources.get(name, False) and SignalKind.RAMAN in descriptor.kinds
+        )
 
     def local_reference_card_count(self, kind: SignalKind) -> int:
         """Information only: enabled, locally known cards before chemical/text filters."""
@@ -304,6 +343,7 @@ class SpectroscopySourceCatalog:
     def refresh(self, name: str | None = None) -> None:
         names = [name] if name is not None else list(self._descriptors)
         for source_name in names:
+            self._refresh_revisions[source_name] = self._refresh_revisions.get(source_name, 0) + 1
             self._failures.pop(source_name, None)
             if source_name == USER_LIBRARY_NAME:
                 # A running search keeps its own consistent snapshot of the cards.

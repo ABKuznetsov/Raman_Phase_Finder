@@ -14,7 +14,9 @@ class ProjectTree(QTreeWidget):
     series_create_requested = Signal()
     object_move_to_series_requested = Signal(str, str, str)
     spectrum_selection_changed = Signal(list)
+    spectrum_visibility_edited = Signal(list)
     active_spectrum_requested = Signal(str)
+    project_selected = Signal()
     object_reorder_requested = Signal(str, str, int)
 
     def __init__(self) -> None:
@@ -22,6 +24,7 @@ class ProjectTree(QTreeWidget):
         self.setHeaderLabel("Data")
         self.setToolTip(
             "Project tree\nSelect a spectrum to make it active.\n"
+            "Select the project name to return to its reference comparison, if present.\n"
             "Checkboxes show or hide spectra or a complete series.\n"
             "Double click a spectrum to show only it."
         )
@@ -54,8 +57,9 @@ class ProjectTree(QTreeWidget):
         self._series_items = {}
         self._series_names = [(item.id, item.name) for item in series]
         by_id = {item.id: item for item in spectra}
-        self._spectrum_order = [item for item in spectrum_order_ids if item in by_id]
-        self._spectrum_order.extend(item.id for item in spectra if item.id not in self._spectrum_order)
+        self._spectrum_order = list(dict.fromkeys(
+            [item for item in spectrum_order_ids if item in by_id] + list(by_id)
+        ))
         available = set(by_id)
         new_ids = available - self._known_ids
         self._checked_ids &= available
@@ -65,7 +69,7 @@ class ProjectTree(QTreeWidget):
         root = QTreeWidgetItem([project_name])
         root.setData(0, Qt.ItemDataRole.UserRole, ("project", project_id))
         self.addTopLevelItem(root)
-        claimed: set[str] = set()
+        parent_by_spectrum: dict[str, QTreeWidgetItem] = {}
         for group in series:
             series_item = QTreeWidgetItem([group.name])
             series_item.setData(0, Qt.ItemDataRole.UserRole, ("series", group.id))
@@ -73,29 +77,25 @@ class ProjectTree(QTreeWidget):
             series_item.setToolTip(0, "Project series\nCheckbox: show or hide every spectrum in this series.")
             self._series_items[group.id] = series_item
             root.addChild(series_item)
-            member_ids = set(group.spectrum_ids)
-            for spectrum_id in self._spectrum_order:
-                if spectrum_id not in member_ids:
-                    continue
-                spectrum = by_id.get(spectrum_id)
-                if spectrum is not None and spectrum_id not in claimed:
-                    self._add_spectrum_item(series_item, spectrum)
-                    claimed.add(spectrum_id)
-        unassigned = [by_id[item] for item in self._spectrum_order if item not in claimed]
-        if unassigned:
-            no_series = QTreeWidgetItem(["No series"])
-            no_series.setData(0, Qt.ItemDataRole.UserRole, ("group", "unassigned"))
-            root.addChild(no_series)
-            for spectrum in unassigned:
-                self._add_spectrum_item(no_series, spectrum)
+            for spectrum_id in group.spectrum_ids:
+                parent_by_spectrum.setdefault(spectrum_id, series_item)
+        no_series = None
+        for number, spectrum_id in enumerate(self._spectrum_order, 1):
+            parent = parent_by_spectrum.get(spectrum_id)
+            if parent is None:
+                if no_series is None:
+                    no_series = QTreeWidgetItem(["No series"])
+                    no_series.setData(0, Qt.ItemDataRole.UserRole, ("group", "unassigned"))
+                    root.addChild(no_series)
+                parent = no_series
+            self._add_spectrum_item(parent, by_id[spectrum_id], number)
 
         self._restore_expansion_state(root, expansion)
         self._refresh_series_check_states()
         self._updating = False
         self.spectrum_selection_changed.emit(self.checked_spectrum_ids())
 
-    def _add_spectrum_item(self, parent: QTreeWidgetItem, spectrum: ObservedSpectrum) -> None:
-        number = self._spectrum_order.index(spectrum.id) + 1
+    def _add_spectrum_item(self, parent: QTreeWidgetItem, spectrum: ObservedSpectrum, number: int) -> None:
         child = QTreeWidgetItem([f"{number:02d}  {spectrum.name}"])
         child.setData(0, Qt.ItemDataRole.UserRole, ("spectrum", spectrum.id))
         child.setFlags(child.flags() | Qt.ItemFlag.ItemIsUserCheckable)
@@ -227,6 +227,9 @@ class ProjectTree(QTreeWidget):
             self._updating = False
             self.spectrum_selection_changed.emit(self.checked_spectrum_ids())
 
+        if kind in {"series", "spectrum"}:
+            self.spectrum_visibility_edited.emit(self.checked_spectrum_ids())
+
     def _on_item_double_clicked(self, item: QTreeWidgetItem, _column: int) -> None:
         data = item.data(0, Qt.ItemDataRole.UserRole)
         if data and data[0] == "spectrum":
@@ -236,6 +239,8 @@ class ProjectTree(QTreeWidget):
         data = current.data(0, Qt.ItemDataRole.UserRole) if current is not None else None
         if data and data[0] == "spectrum":
             self.active_spectrum_requested.emit(str(data[1]))
+        elif data and data[0] == "project" and not self._updating:
+            self.project_selected.emit()
 
     def keyPressEvent(self, event) -> None:  # type: ignore[override]
         current = self.currentItem()

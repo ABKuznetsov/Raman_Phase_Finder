@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+from collections import OrderedDict
+
 import numpy as np
 
 from vibrational_finder.processing_controller import SpectrumProcessingController
 from vibrational_finder.band_controller import BandController
+from vibrational_finder.phase_subtraction_work import (
+    PhaseFitController, PhaseFitKey, PhaseFitOutcome, PhaseFitRequest, PhaseFitResult, phase_fit_key,
+)
 from vibrational_finder.processing_state import ProcessingOperation
 from vibrational_finder.services.phase_deconvolution import (
-    PHASE_SUBTRACTION_METADATA, PhaseSubtractionFit, fit_known_phase_subtraction, phase_reference_bands, unpack_subtraction,
+    PHASE_SUBTRACTION_METADATA, PhaseSubtractionFit, unpack_subtraction,
 )
 from vibrational_finder.services.preprocessing_service import auto_smoothing_window
+from vibrational_finder.ui.analysis_job_controller import AnalysisJobController
 from vibrational_finder.ui.phase_deconvolution_panel import PhaseDeconvolutionPanel
 from vibrational_finder.ui.preprocessing_panels import (
     BackgroundRemovalPanel,
@@ -36,6 +42,14 @@ class SpectrumProcessingActionsMixin:
         self._processing_previous_range: list[list[float]] | None = None
         self._processing_preview_operation: ProcessingOperation | None = None
         self._phase_subtraction_preview: PhaseSubtractionFit | None = None
+        self._phase_fit_request: PhaseFitRequest | None = None
+        self._phase_fit_key: PhaseFitKey | None = None
+        self._phase_fit_cache: OrderedDict[PhaseFitKey, PhaseFitResult] = OrderedDict()
+        self._stored_subtraction_cache = OrderedDict()
+        self.phase_subtraction_job_controller = AnalysisJobController(
+            PhaseFitController(self._apply_phase_fit), self, lane=self._background_lane,
+        )
+        self.phase_subtraction_job_controller.failed_for_request.connect(self._phase_fit_failed)
         self.action_bar.smoothRequested.connect(self._open_smooth_panel)
         self.action_bar.subtractBackgroundRequested.connect(self._open_background_panel)
         self.action_bar.phaseDeconvolutionRequested.connect(self._open_phase_deconvolution_panel)
@@ -51,9 +65,11 @@ class SpectrumProcessingActionsMixin:
         self._syncing_transform_indicators = False
         self._refresh_processing_controls()
 
-    def apply_project_state(self, state, *, path=None) -> None:
+    def apply_project_state(self, state, *, path=None, take_ownership=False) -> None:
         self.cancel_processing_preview()
-        super().apply_project_state(state, path=path)
+        self._phase_fit_cache.clear()
+        self._stored_subtraction_cache.clear()
+        super().apply_project_state(state, path=path, take_ownership=take_ownership)
 
     def _open_smooth_panel(self) -> None:
         spectrum = self.active_spectrum()
@@ -70,25 +86,16 @@ class SpectrumProcessingActionsMixin:
         self._mount_processing_panel("background", BackgroundRemovalPanel())
 
     def _open_phase_deconvolution_panel(self) -> None:
-        spectrum = self.active_spectrum()
-        if spectrum is None:
+        if self.active_spectrum() is None:
             return
-        profile = self.project.profile_states.get(spectrum.id)
-        selected = profile.selected_results if profile is not None else ()
-        references = phase_reference_bands(spectrum, selected)
-        phases = {
-            candidate.key: (
-                candidate.name or candidate.entry_id,
-                self.project.candidate_colors.get(candidate.key, "#1a73e8"), references[candidate.key],
-            )
-            for result in selected if (candidate := result.candidate).key in references
-        }
         self.cancel_processing_preview()
         self._processing_previous_range = self.spectrum_plot.viewRange()
         settings = self.project.ui.plot_view_settings
         panel = PhaseDeconvolutionPanel(
-            phases, settings.get("subtraction_phase_layers", {}),
+            {}, settings.get("subtraction_phase_layers", {}),
             background_visible=settings.get("subtraction_background_visible", True),
+            experiment_visible=settings.get("subtraction_experiment_visible", False),
+            residual_visible=settings.get("subtraction_residual_visible", True),
         )
         self.action_bar.set_section_editor("phase_deconvolution", panel)
         self._active_processing_key = "phase_deconvolution"
@@ -97,34 +104,110 @@ class SpectrumProcessingActionsMixin:
         panel.cancelRequested.connect(self.cancel_processing_preview)
         panel.layerToggled.connect(lambda key, field, visible: self._set_subtraction_layers((key,), field, visible))
         panel.backgroundToggled.connect(lambda visible: self._set_plot_layer_visible("subtraction_background_visible", visible))
-        panel.displayChanged.connect(lambda: self._redraw_active_spectrum(preserve_x_range=True))
-        if phases:
-            self._fit_phase_deconvolution()
+        panel.displayChanged.connect(self._store_phase_display_settings)
+        self._fit_phase_deconvolution()
+
+    def _store_phase_display_settings(self) -> None:
+        panel = self._active_processing_panel
+        if isinstance(panel, PhaseDeconvolutionPanel):
+            settings = self.project.ui.plot_view_settings
+            settings["subtraction_experiment_visible"] = panel.experiment_visible.isChecked()
+            settings["subtraction_residual_visible"] = panel.residual_visible.isChecked()
+            self.document.mark_changed()
+            self._redraw_active_spectrum(preserve_x_range=True)
 
     def _fit_phase_deconvolution(self) -> None:
         panel = self._active_processing_panel
         spectrum = self.active_spectrum()
         if not isinstance(panel, PhaseDeconvolutionPanel) or spectrum is None:
             return
-        try:
-            fit = fit_known_phase_subtraction(
-                spectrum, {key: bands for key, (_name, _color, bands) in panel.phases.items()},
-                set(panel.phases),
+        self._clear_phase_deconvolution()
+        profile = self.project.profile_states.get(spectrum.id)
+        if profile is None or not profile.selected_results:
+            self._show_phase_fit_result(panel, PhaseFitResult({}, None))
+            return
+        key = phase_fit_key(spectrum, profile.processing.revision, profile.selected_results)
+        cached = profile.phase_fit or self._phase_fit_cache.get(key)
+        if cached is not None:
+            if key in self._phase_fit_cache:
+                self._phase_fit_cache.move_to_end(key)
+            if profile.phase_fit is None:
+                profile.phase_fit = cached
+                self.document.mark_changed()
+            self._phase_fit_key = key
+            self._show_phase_fit_result(panel, cached)
+            return
+        panel.set_phases({}, {})
+        panel.update_fit("Calculating phase subtraction…")
+        request = PhaseFitRequest.snapshot(key, spectrum, profile.selected_results)
+        self._phase_fit_request = request
+        self.phase_subtraction_job_controller.start(request)
+
+    def _current_phase_fit_key(self) -> PhaseFitKey | None:
+        spectrum = self.active_spectrum()
+        profile = self.project.profile_states.get(spectrum.id) if spectrum is not None else None
+        if spectrum is None or profile is None or not profile.selected_results:
+            return None
+        return phase_fit_key(spectrum, profile.processing.revision, profile.selected_results)
+
+    def _apply_phase_fit(self, outcome: PhaseFitOutcome) -> bool:
+        panel = self._active_processing_panel
+        request = outcome.request
+        if request is not self._phase_fit_request or not isinstance(panel, PhaseDeconvolutionPanel):
+            return False
+        self._phase_fit_request = None
+        if request.key != self._current_phase_fit_key():
+            self._fit_phase_deconvolution()
+            return False
+        self._phase_fit_key = request.key
+        profile = self.project.profile_states[request.key.spectrum_id]
+        profile.phase_fit = outcome.result
+        self.document.mark_changed()
+        self._phase_fit_cache[request.key] = outcome.result
+        self._phase_fit_cache.move_to_end(request.key)
+        while len(self._phase_fit_cache) > 4:
+            self._phase_fit_cache.popitem(last=False)
+        self._show_phase_fit_result(panel, outcome.result)
+        return True
+
+    def _phase_fit_failed(self, request: PhaseFitRequest, message: str, _details: str) -> None:
+        panel = self._active_processing_panel
+        if request is self._phase_fit_request and isinstance(panel, PhaseDeconvolutionPanel):
+            self._phase_fit_request = None
+            panel.update_fit(message)
+
+    def _refresh_phase_subtraction_rows(self, references=None) -> None:
+        panel = self._active_processing_panel
+        spectrum = self.active_spectrum()
+        if not isinstance(panel, PhaseDeconvolutionPanel) or spectrum is None:
+            return
+        if references is None:
+            references = {key: bands for key, (_name, _color, bands) in panel.phases.items()}
+        profile = self.project.profile_states.get(spectrum.id)
+        selected = profile.selected_results if profile is not None else ()
+        phases = {
+            candidate.key: (
+                candidate.name or candidate.entry_id,
+                self.project.candidate_colors.get(candidate.key, "#1a73e8"), references[candidate.key],
             )
-        except ValueError as exc:
-            self._clear_phase_deconvolution()
-            panel.update_fit(str(exc))
-        else:
-            self._phase_subtraction_preview = fit
+            for result in selected if (candidate := result.candidate).key in references
+        }
+        panel.set_phases(phases, self.project.ui.plot_view_settings.get("subtraction_phase_layers", {}))
+
+    def _show_phase_fit_result(self, panel: PhaseDeconvolutionPanel, result: PhaseFitResult) -> None:
+        self._refresh_phase_subtraction_rows(result.references)
+        fit = self._phase_subtraction_preview = result.fit
+        if fit is None:
+            panel.update_fit("Accept a phase with reference bands first.")
+        elif fit.bands:
             removed = sum(band.removed for band in fit.bands)
             shared = sum(band.ambiguous for band in fit.bands)
-            if fit.bands:
-                panel.update_fit(
-                    f"Resolved bands: {removed} subtracted · {len(fit.bands) - removed} retained ({shared} shared or ambiguous).",
-                    can_save=removed > 0,
-                )
-            else:
-                panel.update_fit("No resolved bands were found in the measured spectrum.")
+            panel.update_fit(
+                f"Resolved bands: {removed} subtracted · {len(fit.bands) - removed} retained ({shared} shared or ambiguous).",
+                can_save=removed > 0,
+            )
+        else:
+            panel.update_fit("No resolved bands were found in the measured spectrum.")
         self._redraw_active_spectrum(preserve_x_range=True)
 
     def _subtraction_phase_info(self):
@@ -141,12 +224,25 @@ class SpectrumProcessingActionsMixin:
             return self._subtraction_phase_info(), fit.bands, (fit.x, fit.background)
         metadata = self.project.sample_metadata.get(spectrum.id, {})
         stored = metadata.get(PHASE_SUBTRACTION_METADATA)
-        return unpack_subtraction(stored) if stored else ({}, (), None)
+        if not stored:
+            return {}, (), None
+        cache = self._stored_subtraction_cache
+        key = (spectrum.id, stored)
+        if key not in cache:
+            cache[key] = unpack_subtraction(stored)
+            if len(cache) > 8:
+                cache.popitem(last=False)
+        cache.move_to_end(key)
+        return cache[key]
 
     def _save_phase_output(self) -> None:
         panel = self._active_processing_panel
         spectrum, fit = self.active_spectrum(), self._phase_subtraction_preview
         if not isinstance(panel, PhaseDeconvolutionPanel) or spectrum is None or fit is None:
+            return
+        if self._phase_fit_key != self._current_phase_fit_key():
+            self._fit_phase_deconvolution()
+            self._redraw_active_spectrum(preserve_x_range=True)
             return
         try:
             saved = self.processing_controller.save_phase_subtraction(spectrum.id, fit, self._subtraction_phase_info())
@@ -159,7 +255,10 @@ class SpectrumProcessingActionsMixin:
         self.statusBar().showMessage(f"Saved: {saved.name}", 6000)
 
     def _clear_phase_deconvolution(self) -> None:
+        self._phase_fit_request = None
+        self._phase_fit_key = None
         self._phase_subtraction_preview = None
+        self.phase_subtraction_job_controller.cancel()
 
     def fit_active_plot(self) -> None:
         if self._active_processing_key in {None, "bands", "phase_deconvolution"}:
@@ -351,7 +450,7 @@ class SpectrumProcessingActionsMixin:
         self._processing_previous_range = None
         self._processing_preview_operation = None
         if key is not None:
-            self.action_bar.clear_section_editor(key)
+            self.action_bar.clear_section_editor(key, collapse=key == "phase_deconvolution")
 
     def undo_active_processing(self) -> None:
         spectrum = self.active_spectrum()

@@ -15,9 +15,9 @@ from urllib.request import urlopen
 import certifi
 import numpy as np
 
-from finder_core.cache import app_cache_dir
-from finder_core.data_sources import SourceQuery
-from finder_core.models import CandidateRecord, SignalKind
+from vibrational_finder.core.cache import app_cache_dir
+from vibrational_finder.core.data_sources import SourceQuery
+from vibrational_finder.core.models import CandidateRecord, SignalKind
 from vibrational_finder.band_detection import BandDetectionOptions, extract_reference_band_set
 from vibrational_finder.models import ReferenceSpectrum
 from vibrational_finder.preprocessing import preprocess_spectrum

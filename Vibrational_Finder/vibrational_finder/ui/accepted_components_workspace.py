@@ -5,7 +5,7 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QLabel, QMenu, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 
 from vibrational_finder.models import VibrationalMatchResult
-from vibrational_finder.ui.managed_table import ManagedColumnTable
+from vibrational_finder.ui.managed_table import ManagedColumnTable, context_row_keys
 from vibrational_finder.ui.phase_color_delegate import PhaseColorDelegate
 
 
@@ -14,6 +14,7 @@ class AcceptedComponentsWorkspace(QWidget):
     colorRequested = Signal(str)
     removeRequested = Signal(str)
     clearRequested = Signal()
+    exportRequested = Signal(object, str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -38,6 +39,7 @@ class AcceptedComponentsWorkspace(QWidget):
         self.table.verticalHeader().hide()
         self.table.verticalHeader().setDefaultSectionSize(26)
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.table.setSelectionMode(QTableWidget.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setAlternatingRowColors(True)
         self.table.setShowGrid(False)
@@ -55,7 +57,10 @@ class AcceptedComponentsWorkspace(QWidget):
         results: list[VibrationalMatchResult],
         visible_keys: set[str],
         colors: dict[str, str],
+        *,
+        scored: bool = True,
     ) -> None:
+        self.title_label.setText("Accepted results" if scored else "Selected references")
         self._visible_keys = set(visible_keys)
         self.table.setRowCount(len(results))
         for row, result in enumerate(results):
@@ -70,7 +75,7 @@ class AcceptedComponentsWorkspace(QWidget):
                 font = name.font()
                 font.setItalic(True)
                 name.setFont(font)
-            score = QTableWidgetItem(f"{result.score.combined:.1f}")
+            score = QTableWidgetItem(f"{result.score.combined:.1f}" if scored else "—")
             for column, item in enumerate((color, name, score)):
                 item.setData(Qt.ItemDataRole.UserRole, key)
                 self.table.setItem(row, column, item)
@@ -85,14 +90,19 @@ class AcceptedComponentsWorkspace(QWidget):
         self._menu.clear()
         if item is not None:
             key = item.data(Qt.ItemDataRole.UserRole)
-            self.table.selectRow(item.row())
+            keys = context_row_keys(self.table, item.row())
             visible = key in self._visible_keys
             self._menu.addAction("Hide from plot" if visible else "Show on plot",
                                  lambda: self.visibilityChanged.emit(key, not visible))
             self._menu.addAction("Change color…", lambda: self.colorRequested.emit(key))
             self._menu.addSeparator()
+            self._menu.addAction("Export reference as RREF…",
+                                 lambda: self.exportRequested.emit(keys, ".rref"))
+            self._menu.addAction("Export reference as JSON…",
+                                 lambda: self.exportRequested.emit(keys, ".json"))
+            self._menu.addSeparator()
             self._menu.addAction("Remove result", lambda: self.removeRequested.emit(key))
         if self.table.rowCount():
-            self._menu.addAction("Clear accepted results", self.clearRequested.emit)
+            self._menu.addAction(f"Clear {self.title_label.text().lower()}", self.clearRequested.emit)
             self._menu.popup(self.table.viewport().mapToGlobal(position))
 

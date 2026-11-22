@@ -9,7 +9,7 @@ from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import QDialog, QInputDialog, QMenu, QVBoxLayout
 
-from finder_core.models import SignalKind
+from vibrational_finder.core.models import SignalKind
 from vibrational_finder.plot_export.metadata import CanvasLayer, tag_canvas_item
 from vibrational_finder.preprocessing import normalize_y
 from vibrational_finder.ui.plot_canvas_appearance import apply_spectrum_appearance
@@ -58,6 +58,7 @@ class PlotDisplayActionsMixin:
             if controls.plot_aspect_mode.findText(mode) < 0:
                 controls.plot_aspect_mode.addItem(mode)
         self._plot_settings_dialog = None
+        self._show_candidate_profile = False
         self._plot_cursor = None
         self._plot_axis_spectra = ()
         self.spectrum_plot.scene().sigMouseMoved.connect(self._move_plot_cursor)
@@ -69,10 +70,9 @@ class PlotDisplayActionsMixin:
         )
         controls.plotAspectModeChanged.connect(self._apply_plot_aspect)
         controls.spectrumDisplayModeChanged.connect(self._display_mode_changed)
-        controls.spectrumOffsetPercentChanged.connect(
-            lambda _percent: self._update_selected_plot(preserve_view=True)
-        )
+        controls.spectrumOffsetPercentChanged.connect(self._display_offset_changed)
         self.project_tree.spectrum_selection_changed.connect(self._update_selected_plot)
+        self.project_tree.spectrum_visibility_edited.connect(self._store_visible_spectra)
         self._plot_layer_menu = QMenu(self.spectrum_plot)
         self._phase_legend_menu = QMenu("Phase legend", self.spectrum_plot)
         self._phase_legend_menu.setObjectName("phaseLegendMenu")
@@ -117,6 +117,16 @@ class PlotDisplayActionsMixin:
             self._phase_legend_actions[multi_legend_mode(settings)].setChecked(True)
             menu.addMenu(self._phase_legend_menu)
         menu.addSeparator()
+        preview = self._preview_result
+        reference = (preview.aligned_reference or preview.candidate.reference) if preview is not None else None
+        candidate_profile = menu.addAction("Candidate profile")
+        candidate_profile.setCheckable(True)
+        candidate_profile.setEnabled(bool(reference and reference.x and reference.y)
+                                     and settings.get("layer_preview_peak_positions_visible", True)
+                                     and preview.candidate.key not in self._active_accepted_candidate_keys())
+        candidate_profile.setChecked(self._show_candidate_profile)
+        candidate_profile.setToolTip("Overlay the selected candidate's spectrum without changing its peak lines.")
+        candidate_profile.toggled.connect(self._set_candidate_profile_visible)
         for label, key, default in (
             ("Grid", "grid_visible", False),
             ("Reference profile", "layer_phase_profiles_visible", True),
@@ -139,6 +149,15 @@ class PlotDisplayActionsMixin:
         markers_only.triggered.connect(self._show_markers_only)
         self._add_subtraction_layer_menu(menu)
         menu.popup(self.spectrum_plot.viewport().mapToGlobal(point))
+
+    def _active_accepted_candidate_keys(self) -> set[str]:
+        spectrum = self.active_spectrum()
+        profile = self.project.profile_states.get(spectrum.id) if spectrum is not None else None
+        return {result.candidate.key for result in profile.selected_results} if profile is not None else set()
+
+    def _set_candidate_profile_visible(self, visible: bool) -> None:
+        self._show_candidate_profile = visible
+        self._redraw_active_spectrum(preserve_view=True)
 
     def _add_subtraction_layer_menu(self, menu: QMenu) -> None:
         primary = self.active_spectrum()
@@ -238,7 +257,8 @@ class PlotDisplayActionsMixin:
     def _remember_spectrum_legend_position(self, spectrum_id: str | None, x: float, y: float) -> None:
         settings = self.project.ui.plot_view_settings
         if spectrum_id is None:
-            settings["multi_common_legend_position"] = [x, y]
+            key = "reference_legend_position" if self.active_spectrum() is None else "multi_common_legend_position"
+            settings[key] = [x, y]
             self.document.mark_changed()
             self._reposition_band_annotations()
             return
@@ -263,10 +283,26 @@ class PlotDisplayActionsMixin:
         self._sync_plot_settings_dialog()
 
     def _display_mode_changed(self) -> None:
+        mode = self.plot_control_bar.spectrum_display_mode.currentText()
+        if self.project.ui.display_mode != mode:
+            self.project.ui.display_mode = mode
+            self.document.mark_changed()
         self._sync_plot_mode_controls()
         if self._active_processing_key is not None and self._active_processing_key != "bands":
             self.cancel_processing_preview()
         self._redraw_active_spectrum()
+
+    def _display_offset_changed(self, percent: int) -> None:
+        if self.project.ui.multi_offset != percent:
+            self.project.ui.multi_offset = percent
+            self.document.mark_changed()
+        self._update_selected_plot(preserve_view=True)
+
+    def _store_visible_spectra(self, spectrum_ids: list[str]) -> None:
+        visible = set(spectrum_ids)
+        if self.project.visible_observed_keys != visible:
+            self.project.visible_observed_keys = visible
+            self.document.mark_changed()
 
     def _set_plot_normalization(self, enabled: bool) -> None:
         if self._active_processing_key not in {None, "bands", "phase_deconvolution"}:
@@ -331,6 +367,7 @@ class PlotDisplayActionsMixin:
             phases.visibilityChanged.connect(self._set_component_visible)
             phases.removeRequested.connect(self._remove_component)
             phases.clearRequested.connect(self._clear_components)
+            phases.exportRequested.connect(self._export_selected_references)
         self._sync_plot_settings_dialog(force=True)
         self._refresh_plot_settings_profile()
         self._plot_settings_dialog.show()
@@ -454,7 +491,14 @@ class PlotDisplayActionsMixin:
         if panel is None:
             return
         spectrum = self.active_spectrum()
-        panel.set_active_profile_label(f"Active spectrum: {spectrum.name or spectrum.id}" if spectrum else "")
+        panel.set_active_profile_label(f"Active spectrum: {spectrum.name or spectrum.id}" if spectrum else
+                                       "Reference comparison" if self.project.working_references else "")
+        if spectrum is None:
+            panel.profile_candidates_workspace.set_components(
+                self.project.working_references, self.project.visible_working_reference_keys,
+                self.project.candidate_colors, scored=False,
+            )
+            return
         profile = self.project.profile_states.get(spectrum.id) if spectrum else None
         panel.profile_candidates_workspace.set_components(
             profile.selected_results if profile else [],
@@ -465,7 +509,9 @@ class PlotDisplayActionsMixin:
     def _move_plot_cursor(self, position) -> None:
         view = self.spectrum_plot.getViewBox()
         spectrum = self.active_spectrum()
-        if spectrum is None or not view.sceneBoundingRect().contains(position):
+        if not (spectrum is not None or self.project.visible_working_reference_keys) or not (
+            view.sceneBoundingRect().contains(position)
+        ):
             if self._plot_cursor is not None:
                 self._plot_cursor.hide()
             self.plot_control_bar.set_cursor_readout()
@@ -474,7 +520,8 @@ class PlotDisplayActionsMixin:
         axis = self.spectrum_plot.getAxis("bottom")
         x = float(axis.display_values([point.x()])[0])
         self.plot_control_bar.set_cursor_readout(
-            position=x if math.isfinite(x) else None, intensity=point.y(), kind=spectrum.kind,
+            position=x if math.isfinite(x) else None, intensity=point.y(),
+            kind=spectrum.kind if spectrum is not None else SignalKind.RAMAN,
             x_unit="nm" if axis.wavelength_context is not None else "cm⁻¹",
         )
         if self.project.ui.plot_view_settings.get("cursor_vertical_line_visible", False):
@@ -489,11 +536,14 @@ class PlotDisplayActionsMixin:
         settings = self._plot_settings_model()
         if spectrum is None and getattr(self.spectrum_plot, "_vibrational_spectrum_id", None):
             spectrum = self.active_spectrum()
-        relative = self.plot_control_bar.normalize_checkbox.isChecked()
+        reference_comparison = spectrum is None and self.active_spectrum() is None and bool(self.project.working_references)
+        relative = reference_comparison or self.plot_control_bar.normalize_checkbox.isChecked()
         apply_spectrum_appearance(
             self.spectrum_plot, settings,
             title=spectrum.name if spectrum else "Raman Phase Finder: spectrum and candidate markers",
-            x_label="Raman shift" if spectrum is not None and spectrum.kind == SignalKind.RAMAN else "Wavenumber",
+            x_label="Raman shift" if reference_comparison or (
+                spectrum is not None and spectrum.kind == SignalKind.RAMAN
+            ) else "Wavenumber",
             y_label="Relative intensity" if relative else "Intensity",
             y_unit="" if relative else "a.u.",
             all_black=bool(self.project.ui.plot_view_settings.get("all_observed_black", False)),

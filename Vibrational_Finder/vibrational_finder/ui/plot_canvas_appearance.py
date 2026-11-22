@@ -7,7 +7,7 @@ import pyqtgraph as pg
 from PySide6.QtCore import QLineF, QRectF, Qt
 from PySide6.QtGui import QColor, QFont
 
-from finder_core.models import SignalKind
+from vibrational_finder.core.models import SignalKind
 from vibrational_finder.plot_export.metadata import CanvasLayer, canvas_item_tag, tag_canvas_item
 from vibrational_finder.ui.plot_view_settings import PlotViewSettings, plot_style_from_view_settings
 

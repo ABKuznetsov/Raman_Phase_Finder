@@ -3,15 +3,18 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field, replace
 from heapq import heappush, heapreplace
+from math import isfinite
 
 import numpy as np
 
-from finder_core.data_sources import SourceQuery
-from finder_core.models import CandidateRecord, MatchScore, SignalKind, SignalTrace
+from vibrational_finder.core.data_sources import SourceQuery
+from vibrational_finder.core.models import CandidateRecord, MatchScore, SignalKind, SignalTrace
 from vibrational_finder.band_detection import BandDetectionOptions, extract_reference_band_set
+from vibrational_finder.cancellation import JobCancelled, checkpoint
 from vibrational_finder.models import CompoundCandidate, ReferenceBandSet, ReferenceSpectrum, SpectralBand, VibrationalMatchResult
 from vibrational_finder.raman_gain import (
-    GainMatch, GainWindow, RamanPeakPriority, compare_gain_bands, priority_score, raman_priority_weights,
+    GainMatch, GainWindow, RamanPeakPriority, compare_gain_bands, gain_band_is_strong,
+    priority_score, raman_priority_weights,
 )
 from vibrational_finder.services.staged_search import ReferenceSearchSource
 
@@ -33,6 +36,7 @@ class _Hit:
     reference: ReferenceSpectrum | None = None
     for_gain: bool = False
     ranked_score: float | None = None
+    dominant_weights: dict[int, float] = field(default_factory=dict)
 
     @property
     def score(self) -> float:
@@ -40,7 +44,42 @@ class _Hit:
             return self.match.quality
         # A perfect individual line can be diagnostic, but isn't a whole fingerprint.
         support = (0.0, 0.25, 0.78, 1.0)[min(len(self.match.pairs), 3)]
-        return self.match.quality * support
+        score = self.match.quality * support
+        if self.dominant_weights:
+            matched = {i for i, _, _ in self.match.pairs}
+            missing = sum(weight for i, weight in self.dominant_weights.items() if i not in matched)
+            score *= 1.0 - 0.35 * missing
+        return score
+
+
+def _dominant_band_weights(bands: list[SpectralBand], window: GainWindow) -> dict[int, float]:
+    """Select resolved experimental peaks using prominence above their local background."""
+    intervals = []
+    for i, band in enumerate(bands):
+        if not window.includes(band.position):
+            continue
+        radius = max(1.7, band.width / 2) if isfinite(band.width) else 1.7
+        intervals.append((band.position - radius, band.position + radius, i))
+    if len(intervals) < 2:
+        return {}
+    intervals.sort()
+    # Use even overlapping reliable peaks to set the scale, so a weak isolated
+    # peak is not promoted when the strongest feature cannot be resolved.
+    reliable = {
+        i: bands[i].prominence for _, _, i in intervals
+        if gain_band_is_strong(bands[i]) and isfinite(bands[i].prominence) and bands[i].prominence > 0.
+    }
+    threshold = 0.30 * max(reliable.values(), default=0.)
+    selected = {}
+    previous_right = float("-inf")
+    for j, (lo, hi, i) in enumerate(intervals):
+        overlaps = previous_right >= lo or (j + 1 < len(intervals) and intervals[j + 1][0] <= hi)
+        previous_right = max(previous_right, hi)
+        prominence = reliable.get(i)
+        if not overlaps and prominence is not None and prominence >= threshold:
+            selected[i] = prominence
+    total = sum(selected.values())
+    return {i: value / total for i, value in selected.items()}
 
 
 def rank_raman_index(
@@ -60,9 +99,11 @@ def rank_raman_index(
     detection = BandDetectionOptions(backend="scipy", min_prominence=0.04, min_width_cm1=2.0)
     limit = max(1, limit)
     weights = raman_priority_weights(observed_bands, window, peak_priority)
+    dominant_weights = {} if for_gain else _dominant_band_weights(observed_bands, window)
     pool_limit = 2 * limit if weights else limit
 
     for source in sources:
+        checkpoint()
         hits: list[tuple[float, int, _Hit]] = []
         scanned = unreadable = 0
         first_error = ""
@@ -75,9 +116,11 @@ def rank_raman_index(
             records = [r for r in records if r.kind in (SignalKind.RAMAN, SignalKind.UNKNOWN)
                        and query.allows_formula(r.formula) and (candidate_gate is None or candidate_gate(r))]
             for start in range(0, len(records), 400):
+                checkpoint()
                 batch = records[start:start + 400]
                 indexed = cache.load_band_sets([row.key for row in batch], recipe) if cache is not None else {}
                 for record in batch:
+                    checkpoint()
                     if record.key in seen:
                         continue
                     scanned += 1
@@ -86,10 +129,13 @@ def rank_raman_index(
                     if bands is None:
                         try:
                             reference = source.load_spectrum(record)
+                            checkpoint()
                             bands = reference.band_set
                             if bands is None and reference.x and reference.y:
                                 bands = extract_reference_band_set(reference, detection,
                                                                   origin=record.metadata.get("origin") or "experimental")
+                        except JobCancelled:
+                            raise
                         except Exception as exc:
                             unreadable += 1
                             first_error = first_error or f"{type(exc).__name__}: {exc}"
@@ -100,12 +146,15 @@ def rank_raman_index(
                     match = compare_gain_bands(observed_bands, bands.bands, window=window,
                                                max_shift=max_shift, shift_step=coarse_step, use_evidence_confidence=for_gain)
                     if match.pairs:
-                        hit = _Hit(record, bands, match, reference, for_gain=for_gain)
+                        hit = _Hit(record, bands, match, reference, for_gain=for_gain,
+                                   dominant_weights=dominant_weights)
                         item = (hit.score, -scanned, hit)
                         if len(hits) < pool_limit:
                             heappush(hits, item)
                         elif item[:2] > hits[0][:2]:
                             heapreplace(hits, item)
+        except JobCancelled:
+            raise
         except Exception as exc:
             result.failures[source.name] = f"{type(exc).__name__}: {exc}"
         result.scanned += scanned
@@ -121,11 +170,13 @@ def rank_raman_index(
                 hit.ranked_score = priority_score(hit.score, hit.match, weights)
             ordered.sort(key=lambda item: item[2].ranked_score, reverse=True)
         for _, _, hit in ordered[:limit]:
+            checkpoint()
             if hit.reference is None:
                 try:
                     hit.reference = source.load_spectrum(hit.record)
                 except Exception:
                     pass  # An indexed band-only match still exists without its profile.
+            checkpoint()
             if not for_gain and refine_profiles and _profile_supports_alignment(hit):
                 refined = compare_gain_bands(observed_bands, hit.bands.bands, window=window,
                                              max_shift=max_shift, shift_step=0.5)
@@ -175,6 +226,7 @@ def _make_result(hit: _Hit, observed: list[SpectralBand]) -> VibrationalMatchRes
     reference_candidate = CompoundCandidate(
         record.key, record.source, record.entry_id, record.name, record.formula, record.kind,
         dict(record.metadata), reference, hit.bands,
+        card_payload=hit.reference.card_payload if hit.reference is not None else None,
     )
     aligned = None if reference is None else replace(
         reference, x=[value + match.shift for value in reference.x], band_set=hit.bands,

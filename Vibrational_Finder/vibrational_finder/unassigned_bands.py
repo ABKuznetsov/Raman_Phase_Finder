@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from dataclasses import replace
 
 from vibrational_finder.models import ObservedSpectrum, SpectralBand, VibrationalMatchResult
-from vibrational_finder.raman_gain import GainWindow
+from vibrational_finder.raman_gain import GainWindow, gain_band_is_strong
 from vibrational_finder.services.phase_deconvolution import phase_reference_bands, retained_raman_evidence
 
 
@@ -18,11 +18,22 @@ def copy_spectral_bands(bands: Iterable[SpectralBand]) -> list[SpectralBand]:
 def raman_gain_remaining_bands(
     spectrum: ObservedSpectrum, accepted: list[VibrationalMatchResult],
 ) -> list[SpectralBand] | None:
-    evidence = raman_gain_evidence(spectrum, accepted)
+    evidence = _retained_raman_gain_evidence(spectrum, accepted)
     return evidence[0] if evidence is not None else None
 
 
 def raman_gain_evidence(
+    spectrum: ObservedSpectrum, accepted: list[VibrationalMatchResult],
+) -> tuple[list[SpectralBand], GainWindow] | None:
+    """Automatic Gain can count only stable, unresolved bands of the measured trace."""
+    evidence = _retained_raman_gain_evidence(spectrum, accepted)
+    if evidence is None:
+        return None
+    bands, window = evidence
+    return [band for band in bands if gain_band_is_strong(band)], window
+
+
+def _retained_raman_gain_evidence(
     spectrum: ObservedSpectrum, accepted: list[VibrationalMatchResult],
 ) -> tuple[list[SpectralBand], GainWindow] | None:
     phases = phase_reference_bands(spectrum, accepted)

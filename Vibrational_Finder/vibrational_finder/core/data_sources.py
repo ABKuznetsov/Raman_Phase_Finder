@@ -3,8 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from finder_core.chemistry import parse_formula_elements
-from finder_core.models import CandidateRecord, SignalKind, SignalTrace
+from .chemistry import parse_formula_elements
+from .models import CandidateRecord, SignalKind, SignalTrace
 
 
 @dataclass(slots=True)

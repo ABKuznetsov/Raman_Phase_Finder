@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
+    QScrollArea,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -28,12 +30,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from finder_core.models import SignalKind
+from vibrational_finder.core.models import SignalKind
 from vibrational_finder.band_detection import BandDetectionOptions, detect_bands
 from vibrational_finder.io import guess_spectrum_metadata, supported_spectrum_extensions
+from vibrational_finder.io.autodetect import declared_spectrum_units
 from vibrational_finder.io.xy_loader import load_raman_spectrum
 from vibrational_finder.models import ReferenceSpectrum, SpectralBand
 from vibrational_finder.raman_product import is_infrared_card
+from vibrational_finder.services.reference_card_io import (
+    CARD_FORMAT, CARD_VERSION, is_raman_shift_unit, read_reference_card, reference_profiles, validate_reference_card,
+)
 from vibrational_finder.services.preprocessing_service import (
     auto_smoothing_window,
     estimate_background,
@@ -48,6 +54,28 @@ from vibrational_finder.ui.preprocessing_panels import (
     preprocessing_panel_style,
 )
 from vibrational_finder.ui.vibrational_plot import create_vibrational_plot_widget
+
+
+_BAND_FIELDS = (
+    "position_cm1", "intensity", "fwhm_cm1", "mode", "symmetry", "assignment",
+    "polarization", "orientation", "confidence", "comment", "source_ids", "profile_id",
+)
+_CONDITION_FIELDS = (
+    "laser_nm", "temperature_K", "pressure", "sample_form", "orientation", "polarization",
+    "instrument", "resolution", "acquisition_mode", "laser_power_mW", "integration_time_s",
+    "operator", "laboratory", "measurement_date",
+)
+_SOURCE_OPTIONS = (
+    ("Unknown source", "unknown"), ("Literature", "literature"), ("Database", "database"),
+    ("Own measurement", "measurement"), ("Calculation", "calculation"),
+)
+
+
+def _next_id(prefix: str, taken: set[str]) -> str:
+    index = 1
+    while f"{prefix}-{index}" in taken:
+        index += 1
+    return f"{prefix}-{index}"
 
 
 def _dialog_button_style(background: str, border: str) -> str:
@@ -67,15 +95,15 @@ def blank_reference_template(kind: SignalKind | str = SignalKind.RAMAN) -> dict:
     if method not in {"raman", "ftir"}:
         method = ""
     return {
-        "format": "vibrational-reference",
-        "version": 1,
+        "format": CARD_FORMAT,
+        "version": CARD_VERSION,
         "kind": method,
         "metadata": {
             "name": "",
             "formula": "",
             "alternative_name": "",
-            "origin": "experimental",
-            "laser_nm": "" if method == "raman" else "",
+            "origin": "",
+            "laser_nm": "",
             "temperature_K": "",
             "pressure": "",
             "sample_form": "",
@@ -90,12 +118,17 @@ def blank_reference_template(kind: SignalKind | str = SignalKind.RAMAN) -> dict:
             "citation": "",
             "notes": "",
         },
-        "profile": None,
+        "sources": [{"id": "source-1", "type": "unknown", "doi": None, "url": None, "citation": None,
+                     "database": None, "record_id": None, "laboratory": None}],
+        "source_ids": ["source-1"],
+        "profiles": [],
         "bands": [
             {
                 "position_cm1": None,
                 "intensity": None,
+                "intensity_label": None,
                 "fwhm_cm1": None,
+                "uncertainty_cm1": None,
                 "mode": "",
                 "symmetry": "",
                 "assignment": "",
@@ -103,6 +136,8 @@ def blank_reference_template(kind: SignalKind | str = SignalKind.RAMAN) -> dict:
                 "orientation": "",
                 "confidence": "reported / estimated / inferred / unknown",
                 "comment": "Article page, table, figure, or note",
+                "source_ids": [],
+                "profile_id": None,
             }
         ],
     }
@@ -260,7 +295,7 @@ class ReferenceLoadDialog(QDialog):
         layout.addWidget(caption, 0, 0, 1, 2)
 
         spectrum = QPushButton("Load reference spectrum")
-        template = QPushButton("Load filled template")
+        template = QPushButton("Load RREF / JSON")
         spectrum.setMinimumHeight(54)
         template.setMinimumHeight(54)
         spectrum.setStyleSheet(_dialog_button_style("#2367a5", "#5a9bd8"))
@@ -310,6 +345,8 @@ class ReferenceEditorDialog(QDialog):
         "Orientation",
         "Confidence",
         "Source / comment",
+        "Source IDs",
+        "Profile ID",
     ]
 
     def __init__(self, parent: QWidget | None = None, *, default_kind: SignalKind = SignalKind.RAMAN, laser_nm: float = 0.0) -> None:
@@ -323,12 +360,15 @@ class ReferenceEditorDialog(QDialog):
         self._preprocessing_panel_key = ""
         self._preprocessing_cancel_callback = None
         self.profile_path = ""
+        self._loaded_payload: dict = {}
+        self._profile_details: dict = {}
+        self._other_profiles: list[dict] = []
         self.fields: dict[str, QLineEdit] = {}
         self._build_ui(default_kind, laser_nm)
 
     def _build_ui(self, default_kind: SignalKind, laser_nm: float) -> None:
         root = QVBoxLayout(self)
-        load_data = QPushButton("Load")
+        load_data = QPushButton("Load / attach…")
         import_peaks = QPushButton("Load peak table")
         auto_detect = QPushButton("Auto detect")
         smooth = QPushButton("Smooth")
@@ -386,6 +426,7 @@ class ReferenceEditorDialog(QDialog):
         self.kind_combo.addItem("Raman", SignalKind.RAMAN)
         self.kind_combo.hide()
         self.origin_combo = QComboBox()
+        self.origin_combo.addItem("Not stated", "")
         self.origin_combo.addItem("Experimental", "experimental")
         self.origin_combo.addItem("Calculated", "calculated")
         form.addRow("Reference type", self.origin_combo)
@@ -398,18 +439,46 @@ class ReferenceEditorDialog(QDialog):
             ("polarization", "Polarization", ""),
             ("instrument", "Instrument", ""),
             ("resolution", "Resolution", ""),
+            ("acquisition_mode", "Acquisition mode / geometry", ""),
+            ("laser_power_mW", "Laser power, mW", ""),
+            ("integration_time_s", "Integration time, s", ""),
             ("operator", "Operator / author", ""),
             ("laboratory", "Laboratory", ""),
             ("measurement_date", "Measurement date", ""),
             ("doi", "DOI", ""),
             ("citation", "Citation", ""),
+            ("reference_url", "Source URL", ""),
+            ("reference_database", "Source database", ""),
+            ("reference_record_id", "Source record ID", ""),
         ):
             self.fields[key] = QLineEdit(initial)
             form.addRow(label, self.fields[key])
+        self.card_source_type = self._source_combo()
+        self.profile_source_type = self._source_combo()
+        self.profile_source_detail = QLineEdit()
+        form.addRow("Card source", self.card_source_type)
+        form.addRow("Profile source", self.profile_source_type)
+        form.addRow("Profile source ID / citation", self.profile_source_detail)
+        self.profile_x_unit = QLineEdit()
+        self.profile_x_unit.setPlaceholderText("e.g. cm-1; blank if unknown")
+        self.profile_y_unit = QLineEdit()
+        self.profile_y_unit.setPlaceholderText("e.g. counts; blank if unknown")
+        self.profile_state = QComboBox()
+        for label, value in (("Not stated", None), ("Original", "raw"), ("Processed", "processed")):
+            self.profile_state.addItem(label, value)
+        form.addRow("Profile x unit", self.profile_x_unit)
+        form.addRow("Profile y unit", self.profile_y_unit)
+        form.addRow("Profile state", self.profile_state)
+        self.profile_x_unit.editingFinished.connect(self._profile_units_changed)
+        self.profile_y_unit.editingFinished.connect(self._redraw_profile)
         self.notes = QPlainTextEdit()
         self.notes.setMaximumHeight(100)
         form.addRow("Notes", self.notes)
-        splitter.addWidget(metadata)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(metadata)
+        scroll.setMinimumWidth(360)
+        splitter.addWidget(scroll)
 
         work = QWidget()
         work_layout = QVBoxLayout(work)
@@ -447,7 +516,7 @@ class ReferenceEditorDialog(QDialog):
         self.band_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.band_table.setHorizontalScrollMode(QTableWidget.ScrollMode.ScrollPerPixel)
         self.band_table.setMinimumHeight(260)
-        for column, width in enumerate((115, 85, 105, 80, 90, 190, 110, 110, 95, 200)):
+        for column, width in enumerate((115, 85, 105, 80, 90, 190, 110, 110, 95, 200, 110, 110)):
             self.band_table.setColumnWidth(column, width)
         self.band_table.itemChanged.connect(lambda _item: self._redraw_profile())
         self.band_table.setRowCount(6)
@@ -459,6 +528,13 @@ class ReferenceEditorDialog(QDialog):
         buttons.accepted.connect(self._validate_and_accept)
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
+
+    @staticmethod
+    def _source_combo() -> QComboBox:
+        combo = QComboBox()
+        for label, value in _SOURCE_OPTIONS:
+            combo.addItem(label, value)
+        return combo
 
     def _current_kind(self) -> SignalKind:
         value = self.kind_combo.currentData() or SignalKind.RAMAN
@@ -482,13 +558,13 @@ class ReferenceEditorDialog(QDialog):
         self._set_kind(active_kind)
         globs = " ".join(f"*{extension}" for extension in supported_spectrum_extensions())
         file_filter = (
-            f"Reference spectra/templates ({globs} *.vsref *.json);;"
+            f"Reference spectra/templates ({globs} *.rref *.vsref *.json);;"
             f"{_spectrum_file_filter()}"
         )
         path, _ = QFileDialog.getOpenFileName(self, "Add reference spectrum or template", "", file_filter)
         if not path:
             return
-        if Path(path).suffix.lower() in {".json", ".vsref"}:
+        if Path(path).suffix.lower() in {".rref", ".json", ".vsref"}:
             self._load_template(active_kind, path=path)
             return
         if Path(path).suffix.lower() == ".cif":
@@ -500,17 +576,31 @@ class ReferenceEditorDialog(QDialog):
             return
         try:
             loaded = load_raman_spectrum(path, name=Path(path).stem, reference=True)
-            self.profile = loaded if isinstance(loaded, ReferenceSpectrum) else ReferenceSpectrum(**loaded.__dict__)
-            self._remember_original_profile()
         except Exception as exc:
             QMessageBox.warning(self, "Spectrum import failed", str(exc))
             return
+        sources, card_links, profile_links = self._export_sources()
+        old_profile = self._current_profile_payload(profile_links)
+        if old_profile is not None:
+            self._other_profiles.insert(0, old_profile)
+            self._loaded_payload["sources"] = list(sources.values())
+            self._loaded_payload["source_ids"] = card_links
+            for field in _CONDITION_FIELDS:
+                self.fields[field].clear()
+        self.profile = loaded
+        self._profile_details = {"id": _next_id("measurement", {item["id"] for item in self._other_profiles})}
+        self.profile_state.setCurrentIndex(0)
+        x_unit, y_unit = declared_spectrum_units(path)
+        self.profile_x_unit.setText(x_unit)
+        self.profile_y_unit.setText(y_unit)
+        self.profile_source_type.setCurrentIndex(self.profile_source_type.findData("measurement"))
+        self.profile_source_detail.clear()
+        self._remember_original_profile()
         self.profile_path = path
         if not self.fields["name"].text().strip():
             self.fields["name"].setText(Path(path).stem)
-        self.profile_label.setText(f"Spectrum: {path}")
+        self._update_profile_label()
         self._redraw_profile(preserve_view=False)
-        self._detect_peaks()
 
     def _auto_detect_profile(self) -> None:
         if self.profile is None or not self.profile.x or not self.profile.y:
@@ -520,15 +610,7 @@ class ReferenceEditorDialog(QDialog):
         guess = guess_spectrum_metadata(source, x=self.profile.x, y=self.profile.y, kind_hint=SignalKind.RAMAN)
         if not self.fields["name"].text().strip() and self.profile_path:
             self.fields["name"].setText(Path(self.profile_path).stem)
-        if guess.kind == SignalKind.RAMAN and not self.fields["laser_nm"].text().strip():
-            laser_match = None
-            if self.profile_path:
-                import re
-
-                laser_match = re.search(r"(?<!\d)(488|514|515|532|633|638|785|830|1064)(?!\d)", str(self.profile_path))
-            if laser_match is not None:
-                self.fields["laser_nm"].setText(laser_match.group(1))
-        self.profile_label.setText(_guess_summary(source, guess))
+        self._update_profile_label()
         if guess.warnings:
             QMessageBox.information(self, "Auto detect", _guess_summary(source, guess))
         self._redraw_profile()
@@ -540,7 +622,8 @@ class ReferenceEditorDialog(QDialog):
         y_min = 0.0
         y_max = 1.0
         has_content = False
-        if self.profile is not None and self.profile.x and self.profile.y:
+        plot_profile = self.profile is not None and (not table_bands or is_raman_shift_unit(self.profile_x_unit.text()))
+        if plot_profile and self.profile.x and self.profile.y:
             x_profile = np.asarray(self.profile.x, dtype=float)
             y_profile = np.asarray(self.profile.y, dtype=float)
             mask = np.isfinite(x_profile) & np.isfinite(y_profile)
@@ -551,8 +634,9 @@ class ReferenceEditorDialog(QDialog):
                 has_content = True
         self._draw_table_band_preview(table_bands, y_min, y_max)
         has_content = has_content or bool(table_bands)
-        self.plot.setLabel("bottom", "Wavenumber", units="cm-1")
-        self.plot.setLabel("left", "Intensity", units="a.u.")
+        self.plot.setLabel("bottom", "Raman shift" if table_bands else "Spectral coordinate",
+                           units="cm-1" if table_bands else self.profile_x_unit.text().strip())
+        self.plot.setLabel("left", "Intensity", units=self.profile_y_unit.text().strip() if plot_profile else "")
         self._plot_has_content = has_content
         if old_range is not None:
             self.plot.setXRange(float(old_range[0][0]), float(old_range[0][1]), padding=0.0)
@@ -764,6 +848,9 @@ class ReferenceEditorDialog(QDialog):
         if self.profile is None:
             QMessageBox.information(self, "No spectrum", "Add a spectrum before detecting peaks.")
             return
+        if not is_raman_shift_unit(self.profile_x_unit.text()):
+            QMessageBox.information(self, "Profile units", "Set the profile x unit to Raman shift (cm-1) before detecting bands.")
+            return
         bands = detect_bands(self.profile, BandDetectionOptions(backend="auto", fit_peaks=False))
         self._set_bands(bands)
 
@@ -830,11 +917,12 @@ class ReferenceEditorDialog(QDialog):
         if kind is not None:
             self._set_kind(kind)
         if path is None:
-            path, _ = QFileDialog.getOpenFileName(self, "Load reference template", "", "Reference templates (*.vsref *.json);;All files (*)")
+            path, _ = QFileDialog.getOpenFileName(self, "Load reference card or template", "", "Reference cards (*.rref *.vsref *.json);;All files (*)")
         if not path:
             return
         try:
-            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+            target = Path(path)
+            payload = read_reference_card(target) if target.suffix.lower() == ".rref" else json.loads(target.read_text(encoding="utf-8-sig"))
             self.load_payload(payload, source_path=path)
         except Exception as exc:
             QMessageBox.warning(self, "Template import failed", str(exc))
@@ -842,27 +930,71 @@ class ReferenceEditorDialog(QDialog):
     def load_payload(self, payload: dict, *, source_path: str = "") -> None:
         if is_infrared_card(payload):
             raise ValueError("This reference card is infrared; this application supports Raman only.")
-        metadata = payload.get("metadata") or {}
+        self._loaded_payload = deepcopy(payload)
+        metadata = dict(payload.get("metadata") or {})
+        sources = {item["id"]: item for item in payload.get("sources") or []}
+        card_source = self._first_source(payload, sources)
+        for key, field in (("doi", "doi"), ("citation", "citation"), ("url", "reference_url"),
+                           ("database", "reference_database"), ("record_id", "reference_record_id")):
+            if key in card_source:
+                metadata[field] = card_source[key]
+        self.card_source_type.setCurrentIndex(max(0, self.card_source_type.findData(
+            card_source.get("type", "literature" if metadata.get("doi") or metadata.get("citation") else "unknown"),
+        )))
+        profiles = deepcopy(reference_profiles(payload))
+        self._profile_details = profiles[0] if profiles else {}
+        self._other_profiles = profiles[1:]
+        for key, value in (self._profile_details.get("conditions") or {}).items():
+            if key in _CONDITION_FIELDS:
+                metadata[key] = value
         for key, field in self.fields.items():
             value = metadata.get(key)
-            if value is not None:
-                field.setText(str(value))
+            field.setText(str(value) if value is not None else "")
         self.notes.setPlainText(str(metadata.get("notes") or ""))
-        origin_index = self.origin_combo.findData(metadata.get("origin", "experimental"))
+        origin_index = self.origin_combo.findData(metadata.get("origin", ""))
         self.origin_combo.setCurrentIndex(max(0, origin_index))
-        profile = payload.get("profile") or {}
+        profile = self._profile_details
+        profile_source = self._first_source(profile, sources)
+        self.profile_source_type.setCurrentIndex(max(0, self.profile_source_type.findData(profile_source.get("type", "unknown"))))
+        self.profile_source_detail.setText(str(profile_source.get("record_id") or profile_source.get("citation") or ""))
+        self.profile = None
+        self.profile_path = ""
+        self.profile_x_unit.setText(str(profile.get("x_unit") or ""))
+        self.profile_y_unit.setText(str(profile.get("y_unit") or ""))
+        self.profile_state.setCurrentIndex(max(0, self.profile_state.findData(profile.get("state"))))
         if profile.get("x") and profile.get("y"):
             self.profile = ReferenceSpectrum(
                 x=[float(value) for value in profile["x"]],
                 y=[float(value) for value in profile["y"]],
                 kind=self._current_kind(),
                 name=self.fields["name"].text(),
+                x_unit=self.profile_x_unit.text(),
+                y_unit=self.profile_y_unit.text(),
             )
             self.profile_path = str(profile.get("source_path") or source_path)
-            self._remember_original_profile()
-            self.profile_label.setText(f"Spectrum from template: {self.profile_path}")
-            self._redraw_profile(preserve_view=False)
+        self._remember_original_profile()
+        self._update_profile_label()
         self._set_band_rows(payload.get("bands") or [], preserve_view=False)
+
+    @staticmethod
+    def _first_source(data: dict, sources: dict) -> dict:
+        identifiers = data.get("source_ids") or []
+        return sources.get(identifiers[0], {}) if identifiers else {}
+
+    def _update_profile_label(self) -> None:
+        if self.profile is None:
+            self.profile_label.setText("No spectrum profile. A line-only reference can still be saved.")
+            return
+        title = Path(self.profile_path).name if self.profile_path else self._profile_details.get("id", "Profile")
+        if not is_raman_shift_unit(self.profile_x_unit.text()):
+            title += " · Not used as a Raman-shift profile until x units are confirmed."
+        if self._other_profiles:
+            title += f" · {len(self._other_profiles)} other attached profile(s) preserved."
+        self.profile_label.setText(title)
+
+    def _profile_units_changed(self) -> None:
+        self._update_profile_label()
+        self._redraw_profile(preserve_view=False)
 
     def _save_blank_template(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
@@ -880,17 +1012,20 @@ class ReferenceEditorDialog(QDialog):
             QMessageBox.warning(self, "Template save failed", str(exc))
 
     def _set_band_rows(self, bands: list[dict], *, preserve_view: bool = True) -> None:
-        keys = [
-            "position_cm1", "intensity", "fwhm_cm1", "mode", "symmetry", "assignment",
-            "polarization", "orientation", "confidence", "comment",
-        ]
         blocked = self.band_table.blockSignals(True)
         self.band_table.setRowCount(max(len(bands), 6))
         self.band_table.clearContents()
         for row, band in enumerate(bands):
-            for column, key in enumerate(keys):
+            for column, key in enumerate(_BAND_FIELDS):
                 value = band.get(key, "")
-                self.band_table.setItem(row, column, QTableWidgetItem("" if value is None else str(value)))
+                if key == "intensity" and value in (None, ""):
+                    value = band.get("intensity_label", "")
+                if key == "source_ids" and isinstance(value, list):
+                    value = ", ".join(value)
+                item = QTableWidgetItem("" if value is None else str(value))
+                if column == 0:
+                    item.setData(Qt.ItemDataRole.UserRole, deepcopy(band))
+                self.band_table.setItem(row, column, item)
         self.band_table.blockSignals(blocked)
         self._redraw_profile(preserve_view=preserve_view)
 
@@ -918,8 +1053,9 @@ class ReferenceEditorDialog(QDialog):
         positions = np.asarray([float(band["position"]) for band in bands], dtype=float)
         if not np.any(np.isfinite(positions)):
             return
-        profile_x = np.asarray(self.profile.x, dtype=float) if self.profile is not None and self.profile.x else np.asarray([])
-        profile_y = np.asarray(self.profile.y, dtype=float) if self.profile is not None and self.profile.y else np.asarray([])
+        compatible = self.profile is not None and is_raman_shift_unit(self.profile_x_unit.text())
+        profile_x = np.asarray(self.profile.x, dtype=float) if compatible else np.asarray([])
+        profile_y = np.asarray(self.profile.y, dtype=float) if compatible else np.asarray([])
         if not np.isfinite(y_min) or not np.isfinite(y_max) or y_max <= y_min:
             y_min, y_max = 0.0, 1.0
         span = max(y_max - y_min, 1.0e-9)
@@ -990,10 +1126,10 @@ class ReferenceEditorDialog(QDialog):
         return mode if len(mode) <= 18 else ""
 
     def _validate_and_accept(self) -> None:
-        has_profile = self.profile is not None and bool(self.profile.x and self.profile.y)
-        has_bands = any(self._cell(row, 0) for row in range(self.band_table.rowCount()))
-        if not has_profile and not has_bands:
-            QMessageBox.warning(self, "Empty reference", "Add a spectrum or at least one peak position.")
+        try:
+            validate_reference_card(self.payload())
+        except ValueError as exc:
+            QMessageBox.warning(self, "Invalid reference", str(exc))
             return
         self.accept()
 
@@ -1012,67 +1148,139 @@ class ReferenceEditorDialog(QDialog):
         except ValueError:
             return None
 
-    def _intensity_number_or_label(self, text: str):
-        value = self._number_or_none(text)
-        if value is not None:
-            return value
-        normalized = text.strip().lower().replace("_", " ").replace("-", " ")
-        if not normalized:
+    @staticmethod
+    def _store_source(sources: dict, linked: list[str], kind: str, fields: dict, prefix: str) -> list[str]:
+        previous = dict(sources.get(linked[0], {})) if linked else {}
+        source = dict(previous)
+        for key, value in fields.items():
+            if value:
+                source[key] = value
+            else:
+                source.pop(key, None)
+        source["type"] = kind
+        if previous == source:
+            return linked
+        if not previous and kind == "unknown" and not any(fields.values()):
+            return linked
+        key = _next_id(prefix, set(sources))
+        source["id"] = key
+        sources[key] = source
+        return [key, *linked[1:]]
+
+    def _export_sources(self) -> tuple[dict, list[str], list[str]]:
+        sources = {item["id"]: deepcopy(item) for item in self._loaded_payload.get("sources") or []}
+        card_links = self._store_source(
+            sources, list(self._loaded_payload.get("source_ids") or []), self.card_source_type.currentData(),
+            {key: self.fields[field].text().strip() for key, field in (
+                ("doi", "doi"), ("citation", "citation"), ("url", "reference_url"),
+                ("database", "reference_database"), ("record_id", "reference_record_id"),
+            )}, "card",
+        )
+        profile_links = []
+        if self.profile is not None:
+            links = list(self._profile_details.get("source_ids") or [])
+            previous = sources.get(links[0], {}) if links else {}
+            detail = self.profile_source_detail.text().strip()
+            # When displaying an existing source citation in the short
+            # profile field, opening/saving must not duplicate it as a record ID.
+            if detail and detail == str(previous.get("citation") or "") and not previous.get("record_id"):
+                fields = {}
+            else:
+                fields = {"record_id": detail}
+            profile_links = self._store_source(
+                sources, links, self.profile_source_type.currentData(), fields, "profile",
+            )
+        return sources, card_links, profile_links
+
+    def _current_profile_payload(self, source_ids: list[str]) -> dict | None:
+        if self.profile is None:
             return None
-        qualitative = {
-            "very weak": 0.1,
-            "weak": 0.25,
-            "medium": 0.5,
-            "moderate": 0.5,
-            "strong": 0.75,
-            "very strong": 1.0,
-            "vs": 1.0,
-            "s": 0.75,
-            "m": 0.5,
-            "w": 0.25,
-            "vw": 0.1,
+        details = deepcopy(self._profile_details)
+        details.pop("source_path", None)
+        conditions = dict(details.get("conditions") or {})
+        for key in _CONDITION_FIELDS:
+            raw = self.fields[key].text().strip()
+            if not raw:
+                conditions.pop(key, None)
+            elif key in {"laser_nm", "temperature_K", "laser_power_mW", "integration_time_s"}:
+                numeric = self._number_or_none(raw)
+                conditions[key] = numeric if numeric is not None else raw
+            else:
+                conditions[key] = raw
+        state = self.profile_state.currentData()
+        if self._original_profile is not None and self.profile.y != self._original_profile.y:
+            state = "processed"
+        other_ids = {profile["id"] for profile in self._other_profiles}
+        return {
+            **details,
+            "id": details.get("id") or _next_id("measurement", other_ids),
+            "x": [float(value) for value in self.profile.x],
+            "y": [float(value) for value in self.profile.y],
+            "x_unit": self.profile_x_unit.text().strip() or None,
+            "y_unit": self.profile_y_unit.text().strip() or None,
+            "state": state,
+            "conditions": conditions,
+            "source_ids": source_ids,
         }
-        if normalized in qualitative:
-            return qualitative[normalized]
-        for label, mapped in qualitative.items():
-            if label in normalized:
-                return mapped
-        return None
 
     def payload(self) -> dict:
-        metadata = {key: field.text().strip() for key, field in self.fields.items() if field.text().strip()}
-        metadata["origin"] = str(self.origin_combo.currentData() or "experimental")
+        metadata = {key: value for key, value in (self._loaded_payload.get("metadata") or {}).items()
+                    if key not in self.fields and key not in {"origin", "notes"}}
+        metadata.update({key: field.text().strip() for key, field in self.fields.items() if field.text().strip()})
+        if origin := self.origin_combo.currentData():
+            metadata["origin"] = origin
         if self.notes.toPlainText().strip():
             metadata["notes"] = self.notes.toPlainText().strip()
         bands = []
-        keys = [
-            "position_cm1", "intensity", "fwhm_cm1", "mode", "symmetry", "assignment",
-            "polarization", "orientation", "confidence", "comment",
-        ]
         for row in range(self.band_table.rowCount()):
             if not self._cell(row, 0):
                 continue
-            item = {key: self._cell(row, column) for column, key in enumerate(keys)}
+            original = self.band_table.item(row, 0).data(Qt.ItemDataRole.UserRole) or {}
+            item = {key: value for key, value in original.items() if key not in {*_BAND_FIELDS, "intensity_label"}}
+            item.update({key: self._cell(row, column) for column, key in enumerate(_BAND_FIELDS)
+                         if self._cell(row, column)})
             position = self._number_or_none(str(item["position_cm1"]))
             if position is None:
-                continue
+                raise ValueError(f"Band {row + 1}: enter a numeric Raman shift.")
             item["position_cm1"] = position
-            item["intensity"] = self._intensity_number_or_label(str(item["intensity"]))
-            item["fwhm_cm1"] = self._number_or_none(str(item["fwhm_cm1"]))
+            intensity = item.get("intensity", "")
+            item["intensity"] = self._number_or_none(str(intensity))
+            if intensity and item["intensity"] is None:
+                item["intensity_label"] = intensity
+            if item.get("fwhm_cm1"):
+                width = self._number_or_none(str(item["fwhm_cm1"]))
+                if width is None:
+                    raise ValueError(f"Band {row + 1}: enter a numeric FWHM or leave it blank.")
+                item["fwhm_cm1"] = width
+            if item.get("source_ids"):
+                item["source_ids"] = [part.strip() for part in item["source_ids"].split(",") if part.strip()]
             bands.append(item)
-        profile = None
-        if self.profile is not None and self.profile.x and self.profile.y:
-            profile = {
-                "x": [float(value) for value in self.profile.x],
-                "y": [float(value) for value in self.profile.y],
-                "source_path": self.profile_path,
-            }
-        return {
-            "format": "vibrational-reference",
-            "version": 1,
+        sources, card_links, profile_links = self._export_sources()
+        profile = self._current_profile_payload(profile_links)
+        result = {
+            **{key: value for key, value in self._loaded_payload.items() if key not in {"profile", "profiles"}},
+            "format": CARD_FORMAT,
+            "version": CARD_VERSION,
             "kind": self._current_kind().value,
-            "source": "User References",
             "metadata": metadata,
-            "profile": profile,
+            "sources": list(sources.values()),
+            "source_ids": card_links,
+            "profiles": ([profile] if profile is not None else []) + deepcopy(self._other_profiles),
             "bands": bands,
         }
+        # An unchanged legacy trace still follows the v1 reader's implicit
+        # axis convention. Don't migrate it just because someone edits a
+        # line or the name; new attachments never inherit that convention.
+        legacy = self._loaded_payload.get("profile") if self._loaded_payload.get("version", 1) == 1 else None
+        if (
+            legacy and profile is not None and not self._other_profiles and not sources
+            and not legacy.get("x_unit") and not profile["x_unit"] and not profile["y_unit"]
+            and profile["state"] is None and not profile["conditions"]
+            and profile["x"] == legacy.get("x") and profile["y"] == legacy.get("y")
+            and not any(band.get("profile_id") or band.get("source_ids") for band in bands)
+        ):
+            result["version"] = 1
+            result["profile"] = {**legacy, "x": profile["x"], "y": profile["y"]}
+            for key in ("sources", "source_ids", "profiles"):
+                result.pop(key)
+        return result

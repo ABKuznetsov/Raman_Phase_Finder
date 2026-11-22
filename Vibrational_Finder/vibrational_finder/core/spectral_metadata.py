@@ -1,6 +1,25 @@
 from __future__ import annotations
 
+from math import isfinite
 from pathlib import Path
+import re
+
+from vibrational_finder.core.models import CandidateRecord, SignalKind
+
+
+def excitation_wavelength_nm(record: CandidateRecord) -> float | None:
+    if record.kind is SignalKind.FTIR:
+        return None
+    for key in ("laser_nm", "excitation_wavelength_nm", "laser_wavelength_nm"):
+        value = re.fullmatch(
+            r"\s*(\d+(?:[.,]\d+)?)\s*(?:nm)?\s*(?:\([^()\d]*\))?\s*",
+            str(record.metadata.get(key, "")), re.I,
+        )
+        if value:
+            wavelength = float(value[1].replace(",", "."))
+            if isfinite(wavelength) and wavelength > 0:
+                return wavelength
+    return None
 
 
 def infer_orientation(text: str | Path) -> str:

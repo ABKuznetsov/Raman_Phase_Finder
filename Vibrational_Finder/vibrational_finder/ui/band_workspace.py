@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from finder_core.models import SignalKind
+from vibrational_finder.core.models import SignalKind
 from vibrational_finder.band_controller import BandController
 from vibrational_finder.band_detection import BandDetectionOptions
 from vibrational_finder.models import SpectralBand

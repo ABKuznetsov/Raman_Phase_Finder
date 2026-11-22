@@ -9,9 +9,10 @@ from scipy.ndimage import median_filter
 from scipy.optimize import least_squares, nnls
 from scipy.signal import find_peaks, savgol_filter
 
-from finder_core.models import SignalKind
+from vibrational_finder.core.models import SignalKind
 from vibrational_finder.band_detection import BandDetectionOptions, detect_bands
-from vibrational_finder.models import ObservedSpectrum, SpectralBand, VibrationalMatchResult
+from vibrational_finder.cancellation import checkpoint
+from vibrational_finder.models import ObservedSpectrum, ReferenceSpectrum, SpectralBand, VibrationalMatchResult
 from vibrational_finder.raman_gain import GainWindow
 from vibrational_finder.services.preprocessing_service import estimate_background
 
@@ -106,6 +107,7 @@ def _fit_band_curves(x, excess, indices, widths, prominences):
     interval_order = np.argsort(left, kind="stable")
     start = 0
     while start < len(centers):
+        checkpoint()
         first = interval_order[start]
         end, low, high = start + 1, left[first], right[first]
         while end < len(centers) and left[interval_order[end]] <= high:
@@ -126,6 +128,7 @@ def _fit_band_curves(x, excess, indices, widths, prominences):
             return distance, shape, shape * amplitude, spread
 
         def residual(parameters):
+            checkpoint()
             return terms(parameters)[2].sum(axis=1) - excess[low:high]
 
         def jacobian(parameters):
@@ -147,21 +150,29 @@ def _fit_band_curves(x, excess, indices, widths, prominences):
         start = end
 
 
+def phase_reference_input(
+    result: VibrationalMatchResult,
+) -> tuple[Sequence[SpectralBand], ReferenceSpectrum | None]:
+    candidate = result.candidate
+    reference = candidate.reference
+    bands = result.reference_bands or (candidate.band_set.bands if candidate.band_set else [])
+    if not bands and reference is not None and reference.band_set is not None:
+        bands = reference.band_set.bands
+    return bands, reference if not bands else None
+
+
 def phase_reference_bands(
     spectrum: ObservedSpectrum, selected: Sequence[VibrationalMatchResult],
 ) -> dict[str, tuple[SpectralBand, ...]]:
     phases = {}
     for result in selected:
-        candidate = result.candidate
-        reference = candidate.reference
-        bands = result.reference_bands or (candidate.band_set.bands if candidate.band_set else [])
-        if not bands and reference is not None and reference.band_set is not None:
-            bands = reference.band_set.bands
-        if not bands and reference is not None and reference.x_unit == spectrum.x_unit:
+        checkpoint()
+        bands, reference = phase_reference_input(result)
+        if reference is not None and reference.x_unit == spectrum.x_unit:
             bands = detect_bands(reference, BandDetectionOptions(backend="scipy"))
         usable = tuple(band for band in bands if np.isfinite(band.position))
         if usable:
-            phases[candidate.key] = usable
+            phases[result.candidate.key] = usable
     return phases
 
 
@@ -191,6 +202,7 @@ def _assign_phase_bands(x, indices, widths, phases):
     uncertain: set[int] = set()
     tolerances = np.maximum(8.0, widths / 2)
     for phase, bands in phases.items():
+        checkpoint()
         for band in bands:
             position = band.position
             if not np.isfinite(position) or not x[0] <= position <= x[-1]:
@@ -294,6 +306,7 @@ def fit_known_phase_subtraction(
     if not subtract <= phases.keys():
         raise ValueError("A selected phase is no longer available.")
     x, y, sign, background = _subtraction_signal(observed)
+    checkpoint()
     signal = sign * y - background
     indices, widths, prominences, assignments = _resolve_phase_bands(x, signal, phases)
     total_removed, total_retained = np.zeros_like(y), np.zeros_like(y)

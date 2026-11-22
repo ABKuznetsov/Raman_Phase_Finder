@@ -38,7 +38,9 @@ include-package-data = false
 
 [tool.setuptools.packages.find]
 where = ["Vibrational_Finder"]
+include = ["vibrational_finder", "vibrational_finder.*"]
 exclude = ["vibrational_finder.benchmark*"]
+namespaces = false
 
 [tool.setuptools.package-data]
 "vibrational_finder.ui" = ["assets/*.svg"]

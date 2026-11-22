@@ -23,11 +23,10 @@ class PhaseDeconvolutionPanel(QWidget):
 
     def __init__(
         self, phases: dict[str, tuple[str, str, tuple[SpectralBand, ...]]],
-        layer_settings: dict, *, background_visible: bool = True,
+        layer_settings: dict, *, background_visible: bool = True, experiment_visible: bool = False,
+        residual_visible: bool = True,
     ) -> None:
         super().__init__()
-        self.phases = phases
-        self._phase_keys = tuple(phases)
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 2, 0, 2)
         description = QLabel(
@@ -37,7 +36,8 @@ class PhaseDeconvolutionPanel(QWidget):
         layout.addWidget(description)
         self.experiment_visible = QCheckBox("Experiment")
         self.residual_visible = QCheckBox("Residual (dashed)")
-        self.residual_visible.setChecked(True)
+        self.experiment_visible.setChecked(experiment_visible)
+        self.residual_visible.setChecked(residual_visible)
         self.background_visible = QCheckBox("Background")
         self.background_visible.setChecked(background_visible)
         self.background_visible.toggled.connect(self.backgroundToggled)
@@ -47,7 +47,7 @@ class PhaseDeconvolutionPanel(QWidget):
             display.addWidget(box)
         display.addWidget(self.background_visible)
         layout.addLayout(display)
-        table = QTableWidget(len(phases), len(self.DISPLAY_COLUMNS) + 1, self)
+        table = QTableWidget(0, len(self.DISPLAY_COLUMNS) + 1, self)
         table.setObjectName("deconvolutionPhaseTable")
         self.phase_table = table
         table.setHorizontalHeaderLabels(("Phase", *(label for label, _key, _default in self.DISPLAY_COLUMNS)))
@@ -57,23 +57,10 @@ class PhaseDeconvolutionPanel(QWidget):
         header = table.horizontalHeader()
         header.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        for row, (name, color, bands) in enumerate(phases.values()):
-            phase = QTableWidgetItem(name)
-            phase.setFlags(Qt.ItemFlag.ItemIsEnabled)
-            phase.setData(Qt.ItemDataRole.DecorationRole, QColor(color))
-            phase.setToolTip(f"{name} · {len(bands)} reference bands")
-            table.setItem(row, 0, phase)
-            for column, (label, _key, _default) in enumerate(self.DISPLAY_COLUMNS, 1):
-                item = QTableWidgetItem()
-                item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
-                item.setToolTip(f"Show {label.lower()} — {name}")
-                table.setItem(row, column, item)
-        self.sync_layers(layer_settings)
+        self.set_phases(phases, layer_settings)
         table.itemChanged.connect(self._layer_changed)
         header.geometriesChanged.connect(self._fit_table_height)
         table.horizontalScrollBar().rangeChanged.connect(self._fit_table_height)
-        self._fit_table_height()
-        table.setVisible(bool(phases))
         layout.addWidget(table)
         row = QHBoxLayout()
         row.addStretch()
@@ -88,6 +75,27 @@ class PhaseDeconvolutionPanel(QWidget):
         self.status = QLabel("" if phases else "Accept a phase with reference bands first.")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
+
+    def set_phases(self, phases: dict[str, tuple[str, str, tuple[SpectralBand, ...]]], layer_settings: dict) -> None:
+        self.phases = phases
+        self._phase_keys = tuple(phases)
+        table = self.phase_table
+        with QSignalBlocker(table):
+            table.setRowCount(len(phases))
+            for row, (name, color, bands) in enumerate(phases.values()):
+                phase = QTableWidgetItem(name)
+                phase.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                phase.setData(Qt.ItemDataRole.DecorationRole, QColor(color))
+                phase.setToolTip(f"{name} · {len(bands)} reference bands")
+                table.setItem(row, 0, phase)
+                for column, (label, _key, _default) in enumerate(self.DISPLAY_COLUMNS, 1):
+                    item = QTableWidgetItem()
+                    item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsUserCheckable)
+                    item.setToolTip(f"Show {label.lower()} — {name}")
+                    table.setItem(row, column, item)
+            self.sync_layers(layer_settings)
+        self._fit_table_height()
+        table.setVisible(bool(phases))
 
     def _layer_changed(self, item: QTableWidgetItem) -> None:
         if item.column() > 0:

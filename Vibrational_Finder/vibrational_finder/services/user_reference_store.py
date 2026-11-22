@@ -2,87 +2,15 @@
 from __future__ import annotations
 
 import json
-from math import isfinite
 from pathlib import Path
-from tempfile import NamedTemporaryFile
 from threading import RLock
 from uuid import uuid4
 
-from finder_core.models import SignalKind
-from vibrational_finder.models import spectrum_kind
+from vibrational_finder.services.reference_card_io import read_reference_card, validate_reference_card, write_json_atomic
 
 
 _LIBRARY_FORMAT = "vibrational-user-library"
 _LOCK = RLock()
-
-
-def validate_reference_card(payload: object) -> dict:
-    if not isinstance(payload, dict) or ("format" in payload and payload["format"] != "vibrational-reference"):
-        raise ValueError("Expected a vibrational-reference JSON card.")
-    metadata = payload.get("metadata", {})
-    if metadata is None:
-        metadata = {}
-    if not isinstance(metadata, dict):
-        raise ValueError("Reference metadata must be a JSON object.")
-    kind = payload.get("kind") or metadata.get("method")
-    if not isinstance(kind, str) or spectrum_kind(kind) not in {SignalKind.RAMAN, SignalKind.FTIR}:
-        raise ValueError("Set the reference kind to Raman or FTIR.")
-    bands = payload.get("bands")
-    if bands is None:
-        bands = []
-    if not isinstance(bands, list) or any(not isinstance(band, dict) for band in bands):
-        raise ValueError("Reference bands must be a list of JSON objects.")
-    has_bands = False
-    for number, band in enumerate(bands, 1):
-        if band.get("position_cm1") in (None, ""):
-            continue
-        for field in ("position_cm1", "intensity", "fwhm_cm1", "confidence_value"):
-            value = band.get(field)
-            if value in (None, ""):
-                continue
-            try:
-                finite = not isinstance(value, bool) and isfinite(float(value))
-            except (TypeError, ValueError, OverflowError):
-                finite = False
-            if not finite:
-                raise ValueError(f"Band {number}: {field} must be a finite number.")
-        has_bands = True
-    profile = payload.get("profile")
-    if profile is None:
-        profile = {}
-    if not isinstance(profile, dict):
-        raise ValueError("The reference profile must contain x and y arrays.")
-    x, y = profile.get("x", []), profile.get("y", [])
-    if not isinstance(x, list) or not isinstance(y, list) or len(x) != len(y):
-        raise ValueError("The reference profile must contain x and y arrays of equal length.")
-    try:
-        finite = all(not isinstance(value, bool) and isfinite(float(value)) for axis in (x, y) for value in axis)
-    except (TypeError, ValueError, OverflowError):
-        finite = False
-    if not finite:
-        raise ValueError("The reference profile must contain only finite numbers.")
-    if not has_bands and len(x) < 2:
-        raise ValueError("Add a spectrum or at least one valid band position.")
-    return payload
-
-
-def read_reference_card(path: Path) -> dict:
-    return validate_reference_card(json.loads(path.read_text(encoding="utf-8-sig")))
-
-
-def write_json_atomic(path: Path, payload: dict) -> None:
-    content = json.dumps(payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary: Path | None = None
-    try:
-        with NamedTemporaryFile(dir=path.parent, mode="w", encoding="utf-8", delete=False) as handle:
-            temporary = Path(handle.name)
-            handle.write(content)
-        temporary.replace(path)
-        temporary = None
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
 
 
 class UserReferenceStore:
