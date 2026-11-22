@@ -1,0 +1,17 @@
+{
+  "toolkit_version": "1.0.0",
+  "manifest_version": 1,
+  "repository": "https://github.com/ABKuznetsov/Raman_Phase_Finder",
+  "apps": {
+    "ir_raman_phase_finder": {
+      "name": "Raman Phase Finder",
+      "version": "1.0.0",
+      "entry_module": "vibrational_finder.apps.finder_gui_release",
+      "folder": "Vibrational_Finder",
+      "requirements": "pyproject.toml",
+      "release_url": "https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/latest",
+      "manifest_url": "https://raw.githubusercontent.com/ABKuznetsov/Raman_Phase_Finder/main/toolkit/manifest.json",
+      "update_manifest_url": "https://raw.githubusercontent.com/ABKuznetsov/Raman_Phase_Finder/main/toolkit/updates/ir_raman_phase_finder.json"
+    }
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "app_id": "ir_raman_phase_finder",
+  "name": "Raman Phase Finder",
+  "version": "1.0.0",
+  "channel": "stable",
+  "release_url": "https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/tag/v1.0.0",
+  "assets": [
+    {
+      "name": "Raman_Phase_Finder_macOS_1.0.0.pkg",
+      "type": "installer",
+      "platform": "macos",
+      "url": "https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.0/Raman_Phase_Finder_macOS_1.0.0.pkg",
+      "sha256": "6cf4a59a80ba0e4485afcbbb3ecf81eacbdf424baeb2b0ebf8512b64a12ea125",
+      "size_bytes": 5599403
+    }
+  ],
+  "summary": [
+    "First standalone Raman release.",
+    "Opens existing Raman projects and retains local reference libraries and preferences.",
+    "Checks for updates after startup using the new Raman Phase Finder repository."
+  ]
+}
