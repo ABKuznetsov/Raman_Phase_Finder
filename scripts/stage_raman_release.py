@@ -23,7 +23,7 @@ SOURCE_FILES = (
     "installer/build_installer.bat", "installer/clean_payload.bat", "installer/README_build_installer.md",
 )
 LEGACY_MODULES = {"apps/ftir_cli.py", "apps/finder_gui.py", "services/cif_structure_source.py", "services/jarvis_source.py"}
-SUBPACKAGES = {"apps", "io", "plot_export", "services", "ui"}
+SUBPACKAGES = {"apps", "io", "layers", "plot_export", "services", "ui"}
 
 
 def stage(root: Path, target: Path, *, source: bool = False) -> None:
