@@ -12,10 +12,6 @@ See [all releases and release notes](https://github.com/ABKuznetsov/Raman_Phase_
 
 ## Main window
 
-![Raman Phase Finder showing a synthetic carbonate spectrum, an accepted calcite reference and the next candidate in the Gain table](docs/screenshots/raman-phase-finder.png)
-
-*Synthetic example: calcite is accepted and dolomite is suggested for the remaining bands.*
-
 | Area | What you can do |
 | --- | --- |
 | Project tree | Select the active spectrum for search, check other spectra to display, and organize measurements into series. |

@@ -9,7 +9,11 @@ logs/
 build/
 dist/
 *.egg-info/
-installer/output/
+/installer/
+/scripts/
+/tests/
+/docs/
+/PORTABLE_README.txt
 .DS_Store
 ._*
 портобл/
