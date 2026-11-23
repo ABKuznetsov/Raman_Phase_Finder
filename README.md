@@ -1,25 +1,49 @@
 # Raman Phase Finder
 
+![Python 3.11 and 3.12](https://img.shields.io/badge/Python-3.11%20%7C%203.12-blue)
+![Windows, macOS and Linux](https://img.shields.io/badge/Platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey)
+[![MIT License](https://img.shields.io/badge/License-MIT-brightgreen)](LICENSE)
+
 **Raman Phase Finder** is an open-source desktop program for identifying phases from Raman spectra. Compare measured spectra with reference profiles or published band tables, review what each candidate explains, and save the analysis as a portable project.
 
 ## Download
 
-- **Windows 10/11 (64-bit):** [Download Raman Phase Finder 1.0.1 (.exe)](https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.1/Raman_Phase_Finder_Setup_1.0.1.exe).
-- **macOS:** [Download Raman Phase Finder 1.0.0 (.pkg)](https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.0/Raman_Phase_Finder_macOS_1.0.0.pkg).
-- **Linux:** [Run from source](#run-from-source) with Python 3.11 or 3.12.
+- [Windows installer (1.0.1): Raman_Phase_Finder_Setup_1.0.1.exe](https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.1/Raman_Phase_Finder_Setup_1.0.1.exe)
+- [macOS package (1.0.0): Raman_Phase_Finder_macOS_1.0.0.pkg](https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.0/Raman_Phase_Finder_macOS_1.0.0.pkg)
+- Linux: [run from source](#run-from-source) with Python 3.11 or 3.12.
 
 See [all releases and release notes](https://github.com/ABKuznetsov/Raman_Phase_Finder/releases).
 
 ## Main window
 
-| Area | What you can do |
-| --- | --- |
-| Project tree | Select the active spectrum for search, check other spectra to display, and organize measurements into series. |
-| Spectrum plot | Compare individual or stacked spectra. Turn reference profiles, peak lines, shift ticks, and mode labels on or off independently. |
-| Elements | Filter the database by composition. Left-click to require an element, right-click to exclude it, and use **Allow others** to broaden the search. |
-| Candidate list | Preview a reference with one click. Double-click to accept it. Use **Match** for the first pass and **Gain** to see which candidates explain bands still unassigned. |
-| Accepted results | Toggle overlays, change their colors, or remove individual references or clear the list. |
-| Compound details | Inspect the sample or reference metadata, band assignments, and matches. |
+![Raman Phase Finder with two stacked spectra and eight color-coded workspace areas, labeled A to H](docs/screenshots/raman-phase-finder-overview.svg)
+
+| Label | Frame colour | Workspace area |
+| --- | --- | --- |
+| **A** | Purple | **Project tree:** choose the active spectrum for search, check spectra to display, and organize them into series. |
+| **B** | Blue | **Main toolbar:** import spectra, add reference cards, identify compounds, search bands, and open settings. |
+| **C** | Green | **Spectrum plot:** compare individual or stacked spectra with reference profiles, peak lines, shift ticks, and mode labels. |
+| **D** | Orange | **Elements and search:** left-click to require an element, right-click to exclude it, or broaden the search with **Allow others**. |
+| **E** | Red | **Accepted results:** control overlay visibility and colour, remove individual references, or clear the list. |
+| **F** | Turquoise | **Candidate list:** click once to preview a reference; double-click to accept it. **Match** ranks the initial candidates; **Gain** ranks candidates for the remaining bands. |
+| **G** | Pink | **Compound details:** inspect sample and reference metadata, band assignments, and matches. |
+| **H** | Yellow | **Contextual Help:** turn it on to inspect a control without running its command. |
+
+## Helper
+
+Turn on **Help** in the toolbar (**H**) and click a control to see what it does and how to use it. Press **Esc** or click **Help** again to return to normal operation. The **Help** menu also opens a short overview and lets you check for updates.
+
+## Main features
+
+- Import one or more Raman spectra and compare them individually or in vertically offset stacks.
+- Prepare spectra with smoothing, baseline subtraction, despiking, normalization, or Raman shift calibration.
+- Search reference libraries by spectrum or selected bands, and narrow results by chemical composition.
+- Compare **Match**, **Gain**, and unassigned bands as phases are accepted.
+- Control reference profiles, peak lines, lower shift ticks, and mode labels independently.
+- Create searchable reference cards from published band tables without a full measured profile.
+- Save portable `.rpff` projects and export figures as PNG, JPG, layered SVG, or PDF.
+
+**Match** and **Gain** help prioritize references for inspection. They are not probabilities or quantitative phase fractions.
 
 ## Typical workflow
 
@@ -27,8 +51,6 @@ See [all releases and release notes](https://github.com/ABKuznetsov/Raman_Phase_
 2. **Search.** Run **Identify compounds** against the enabled reference libraries. Narrow results with the element table, or use **Band search** to review and edit the positions used for matching.
 3. **Review.** Compare the experimental bands with the reference positions and assignments before accepting a candidate. In automatic search, **Gain** ranks candidates for the remaining bands after a candidate is accepted.
 4. **Save or export.** Save the work as an `.rpff` project, or export the current figure as PNG, JPG, layered SVG or PDF.
-
-**Match** and **Gain** help prioritize references for inspection. They are not probabilities or quantitative phase fractions.
 
 ## Reference cards from the literature
 
@@ -52,11 +74,11 @@ Use **Manage databases** to download or index external libraries and choose whic
 
 Third-party databases are not bundled. Follow each provider's terms and citation guidance. Downloaded and indexed libraries can be searched without an internet connection. Set `IR_RAMAN_OFFLINE=1` to skip release checks.
 
-## Installation and updates
+## Install and run
 
 ### Windows
 
-Run the installer with administrator approval. It installs the program into `%ProgramFiles%\Raman Phase Finder`, creates Start menu shortcuts, and offers an optional desktop shortcut. The first setup may need internet access for Python and packages.
+Run the Windows 10/11 (64-bit) installer with administrator approval. It installs the program into `%ProgramFiles%\Raman Phase Finder`, creates Start menu shortcuts, and offers an optional desktop shortcut. The first setup may need internet access for Python and packages.
 
 The program reuses the per-user Python environment at `%LocalAppData%\Sci\env`. Downloaded databases, user cards and settings are stored under `%LocalAppData%\Sci\apps\Raman Phase Finder`, outside the installation folder.
 
