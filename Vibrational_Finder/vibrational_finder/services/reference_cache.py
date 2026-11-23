@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from contextlib import closing
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from pathlib import Path
 import json
 import math
@@ -526,8 +527,9 @@ class ReferenceSpectrumCache:
             connection.execute("create index if not exists idx_reference_bands_position on reference_bands(position)")
             connection.execute("create index if not exists idx_reference_bands_recipe on reference_bands(recipe_version)")
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         self.root.mkdir(parents=True, exist_ok=True)
-        connection = sqlite3.connect(self.index_path)
-        connection.row_factory = sqlite3.Row
-        return connection
+        with closing(sqlite3.connect(self.index_path)) as connection, connection:
+            connection.row_factory = sqlite3.Row
+            yield connection

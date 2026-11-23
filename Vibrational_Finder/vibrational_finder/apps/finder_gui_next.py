@@ -9,6 +9,7 @@ import time
 from collections.abc import Sequence
 from typing import Protocol
 
+from PySide6.QtCore import QTimer
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import QApplication
 
@@ -102,7 +103,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         app.setWindowIcon(QIcon(str(icon_path)))
     file_open_handler = ProjectFileOpenHandler(app)
     try:
-        project = build_local_project([] if projects else args.files)
+        project = build_local_project(args.files if args.smoke_test and not projects else [])
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     window = SpectroscopyFinderWindow(project, defer_source_settings=True)
@@ -111,9 +112,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             window.open_project_path(projects[0])
         except (OSError, ValueError) as exc:
             parser.error(str(exc))
-    if projects and not args.smoke_test:
-        file_open_handler.enqueue_path(projects[0])
-    file_open_handler.set_window(window)
     handshake = StartupHandshake.from_environment()
     handshake.mark_prepared()
     handshake.wait_until_show(app)
@@ -127,6 +125,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     window.show()
     app.processEvents()
     handshake.mark_ready()
+    file_open_handler.set_window(window)
+    if projects:
+        file_open_handler.enqueue_path(projects[0])
+    elif paths:
+        QTimer.singleShot(0, window, lambda: window.import_spectrum_paths(paths))
     if os.environ.get("IR_RAMAN_CHECK_UPDATES") == "1":
         from vibrational_finder.ui.deferred_updates import update_controller
 

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 APP_NAME = "Raman Phase Finder"
-APP_VERSION = "1.0.0"
+DEFAULT_PLOT_TITLE = f"{APP_NAME}: spectrum and candidate markers"
+APP_VERSION = "1.0.1"
 AUTHOR = "Artem B. Kuznetsov"
 INSTITUTE = "Institute of Geology and Mineralogy SB RAS"
 COPYRIGHT = f"© 2026 {AUTHOR}"

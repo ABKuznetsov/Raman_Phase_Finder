@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import filecmp
 from http.cookiejar import CookieJar
 from pathlib import Path
 import re
@@ -10,6 +11,7 @@ from urllib.parse import quote, urlencode
 from urllib.request import HTTPCookieProcessor, HTTPSHandler, Request, build_opener
 import zipfile
 
+from vibrational_finder.cancellation import JobCancelled, checkpoint
 from vibrational_finder.core.cache import app_cache_dir
 from vibrational_finder.core.data_sources import SourceQuery
 from vibrational_finder.core.models import CandidateRecord, SignalKind
@@ -26,6 +28,8 @@ ROD_BAND_RECIPE_VERSION = "arpls-savgol-ramanchada2-topo-normalized-v1"
 @dataclass(frozen=True, slots=True)
 class RodArchiveInfo:
     path: Path
+    key = "rod_all"
+    label = "Raman Open Database"
 
     @property
     def is_cached(self) -> bool:
@@ -47,13 +51,19 @@ class RodSource:
         self._member_by_record_key: dict[str, str] = {}
         self.refresh_index()
 
+    def available_archives(self) -> list[RodArchiveInfo]:
+        return [self.archive]
+
     def download_archive(
         self,
+        key: str | None = None,
         *,
         include_duplicates: bool = True,
         include_theoretical: bool = True,
         include_errors: bool = False,
     ) -> Path:
+        if key not in (None, self.archive.key):
+            raise ValueError(f"Unknown ROD archive: {key}")
         payload = {"id": "%", "submit": "Search"}
         if include_duplicates:
             payload["include_duplicates"] = "1"
@@ -77,17 +87,18 @@ class RodSource:
         archive_url = f"{ROD_SEARCH_URL}?format=zip&CODSESSION={quote(match.group(1))}"
         target = self.archive.path
         temporary = target.with_suffix(target.suffix + ".part")
-        with opener.open(archive_url, timeout=300) as response:
-            with temporary.open("wb") as handle:
-                shutil.copyfileobj(response, handle)
         try:
+            with opener.open(archive_url, timeout=300) as response, temporary.open("wb") as handle:
+                shutil.copyfileobj(response, handle)
+            checkpoint()
+            if target.is_file() and filecmp.cmp(temporary, target, shallow=False):
+                return target
             with zipfile.ZipFile(temporary) as archive:
                 if not any(name.lower().endswith(".rod") for name in archive.namelist()):
                     raise RuntimeError("Downloaded ROD archive contains no .rod spectra.")
-        except Exception:
+            temporary.replace(target)
+        finally:
             temporary.unlink(missing_ok=True)
-            raise
-        temporary.replace(target)
         self.refresh_index(force=True)
         return target
 
@@ -114,6 +125,7 @@ class RodSource:
         try:
             with zipfile.ZipFile(self.archive.path) as archive:
                 for member_name in archive.namelist():
+                    checkpoint()
                     if not member_name.lower().endswith(".rod"):
                         continue
                     try:
@@ -187,6 +199,7 @@ class RodSource:
             fit_peaks=False,
         )
         for record in self._records:
+            checkpoint()
             if record.key in indexed_keys:
                 continue
             try:
@@ -214,6 +227,8 @@ class RodSource:
                     self.reference_cache.upsert_band_sets(pending, ROD_BAND_RECIPE_VERSION)
                     pending.clear()
                 indexed += 1
+            except JobCancelled:
+                raise
             except Exception:
                 skipped += 1
         if pending:

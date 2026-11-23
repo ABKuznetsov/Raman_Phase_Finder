@@ -144,6 +144,7 @@ class SpectroscopyFinderWindow(
         plot_layout.addWidget(self.plot_control_bar)
         self.band_information_card = BandInformationCard(self.plot_host)
         self._selected_band_index: int | None = None
+        self._candidate_preview_items: tuple = ()
         self.center_splitter = QSplitter(Qt.Orientation.Vertical)
         self.center_splitter.setObjectName("centerSplitter")
         self._layout_state.register("center_splitter", self.center_splitter)
@@ -383,6 +384,7 @@ class SpectroscopyFinderWindow(
             "show_mode_labels": bool(settings.get("layer_reference_mode_labels_visible", True)),
             "show_assignment_labels": bool(settings.get("layer_reference_assignment_labels_visible", False)),
         }
+        self._candidate_preview_items = ()  # show_observed_spectrum clears the whole canvas.
         show_observed_spectrum(
             self.spectrum_plot,
             primary,
@@ -400,13 +402,6 @@ class SpectroscopyFinderWindow(
             all_observed_black=bool(settings.get("all_observed_black", False)),
             **label_options,
         )
-        preview = getattr(self, "_preview_result", None)
-        if not settings.get("layer_preview_peak_positions_visible", True):
-            preview = None
-        if primary is not None and preview is not None and preview.candidate.kind not in {
-            primary.kind, SignalKind.UNKNOWN,
-        }:
-            preview = None
         phases_by_spectrum = {}
         working_legend = []
         normalized = self.plot_control_bar.normalize_checkbox.isChecked()
@@ -459,12 +454,6 @@ class SpectroscopyFinderWindow(
                 results = list(self.project.working_references)
                 visible_keys = set(self.project.visible_working_reference_keys)
             accepted = tuple(result for result in results if result.candidate.key in visible_keys)
-            preview_key = None
-            if (preview is not None and (observed is None or (active_visible and observed is primary))
-                    and not any(item.candidate.key == preview.candidate.key for item in results)):
-                preview_key = preview.candidate.key
-                results.append(preview)
-                visible_keys.add(preview_key)
             if not results and profile is None:
                 continue
             drawn_samples = show_reference_layers(
@@ -476,10 +465,8 @@ class SpectroscopyFinderWindow(
                 if (active_visible and observed is primary and profile is not None
                     and settings.get("layer_unknown_peaks_visible", True)) else None,
                 observed=observed,
-                preview_key=preview_key,
                 preserve_view=primary is not None or (preserve_view and bool(self.project.working_references)),
                 show_profiles=bool(settings.get("layer_phase_profiles_visible", True)),
-                show_preview_profile=self._show_candidate_profile,
                 show_bands=bool(settings.get("layer_phase_ticks_visible", True)),
                 show_peak_markers=bool(settings.get("layer_reference_peak_markers_visible", False)),
                 show_reference_ticks=bool(settings.get("layer_reference_shift_ticks_visible", True)),
@@ -522,9 +509,57 @@ class SpectroscopyFinderWindow(
             view.sigRangeChanged.connect(self._reposition_band_annotations)
             view.sigResized.connect(self._reposition_band_annotations)
             self._band_annotation_layout_wired = True
-        self._reposition_band_annotations()
+        self._redraw_candidate_preview()
         if axes_changed:
             self._sync_plot_settings_dialog()
+
+    def _redraw_candidate_preview(self) -> None:
+        plot = self.spectrum_plot
+        for item in self._candidate_preview_items:
+            plot.removeItem(item)
+        self._candidate_preview_items = ()
+        preview = self._preview_result
+        settings = self.project.ui.plot_view_settings
+        if preview is not None and settings.get("layer_preview_peak_positions_visible", True):
+            self._draw_candidate_preview(preview, settings)
+        self._reposition_band_annotations()
+
+    def _draw_candidate_preview(self, preview, settings) -> None:
+        plot = self.spectrum_plot
+        observed = self._plot_axis_spectra[0] if self._plot_axis_spectra else None
+        spectrum = self.active_spectrum()
+        if spectrum is not None and self._phase_subtraction_preview is not None:
+            return
+        if observed is not None and (
+            spectrum is None or observed.id != spectrum.id
+            or preview.candidate.kind not in {observed.kind, SignalKind.UNKNOWN}
+        ):
+            return
+        if observed is None:
+            references = self.project.working_references if spectrum is None else ()
+        else:
+            profile = self.project.profile_states.get(observed.id)
+            references = profile.selected_results if profile is not None else ()
+        key = preview.candidate.key
+        if any(result.candidate.key == key for result in references):
+            return
+
+        # Keep the measured and accepted layers alive when only the candidate changes.
+        first_item = len(plot.plotItem.items)
+        preserve_view = observed is not None or bool(self.project.working_references)
+        show_reference_layers(
+            plot, [preview], {key}, self.project.candidate_colors,
+            observed=observed, preview_key=key, clear_existing=False,
+            preserve_view=preserve_view, fit_markers=not preserve_view,
+            show_preview_profile=self._show_candidate_profile,
+            show_bands=bool(settings.get("layer_phase_ticks_visible", True)),
+            show_peak_markers=bool(settings.get("layer_reference_peak_markers_visible", False)),
+            show_mode_labels=bool(settings.get("layer_reference_mode_labels_visible", True)),
+            show_assignment_labels=bool(settings.get("layer_reference_assignment_labels_visible", False)),
+            observed_bands=self.project.sample_bands.get(observed.id, ()) if observed is not None else (),
+            relative_reference_profiles=observed is None and spectrum is None and bool(self.project.working_references),
+        )
+        self._candidate_preview_items = tuple(plot.plotItem.items[first_item:])
 
     def _reposition_band_annotations(self, *_args) -> None:
         if self.spectrum_plot.isVisible():

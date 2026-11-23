@@ -6,9 +6,9 @@ APP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 PREVIEW_SCRIPT="$APP_ROOT/toolkit/launch_ir_raman_phase_finder_preview_macos.py"
 SCI_ROOT="${IR_RAMAN_SCI_ROOT:-$HOME/Library/Application Support/Sci}"
 SCI_ENV="$SCI_ROOT/env"
-IR_RAMAN_USER_ROOT="$SCI_ROOT/apps/ir_raman_analysis_toolkit"
-SCI_LOGS="$SCI_ROOT/logs"
-READY_FILE="$SCI_LOGS/ir_raman_phase_finder_ready.flag"
+RAMAN_USER_ROOT="$SCI_ROOT/apps/Raman Phase Finder"
+SCI_LOGS="$SCI_ROOT/logs/Raman Phase Finder"
+READY_FILE="$SCI_LOGS/ready.flag"
 FAST_START="$APP_ROOT/toolkit/fast_start.py"
 
 NATIVE=()
@@ -23,8 +23,8 @@ if [ -x "$SCI_ENV/bin/python" ] && [ -f "$FAST_START" ]; then
         LOGS="${IR_RAMAN_LOG_DIR:-$SCI_LOGS}"
         mkdir -p "$LOGS"
         exec "${NATIVE[@]}" "$SCI_ENV/bin/python" -B "$FAST_START" \
-            --data-root "$IR_RAMAN_USER_ROOT/data" --logs-root "$LOGS" "$@" \
-            >>"$LOGS/ir_raman_phase_finder_console.log" 2>&1
+            --sci-root "$SCI_ROOT" "$@" \
+            >>"$LOGS/console.log" 2>&1
     else
         START_STATUS=$?
         if [ "$START_STATUS" -ne 75 ]; then
@@ -33,7 +33,7 @@ if [ -x "$SCI_ENV/bin/python" ] && [ -f "$FAST_START" ]; then
     fi
 fi
 
-mkdir -p "$SCI_ROOT" "$IR_RAMAN_USER_ROOT" "$SCI_LOGS"
+mkdir -p "$SCI_ROOT" "$SCI_LOGS"
 
 find_preview_python() {
     for candidate in \
@@ -57,7 +57,7 @@ if [ -n "$PREVIEW_PYTHON" ] && [ -f "$PREVIEW_SCRIPT" ]; then
     exec "$PREVIEW_PYTHON" "$PREVIEW_SCRIPT" "$@"
 fi
 
-echo "Raman Phase Finder startup preview"
+echo "Raman startup preview"
 echo "Application root: $APP_ROOT"
 echo
 
@@ -71,15 +71,15 @@ fi
 echo "2/4 Updates will be checked in the application."
 if [ -f "$FAST_START" ]; then
     exec "${NATIVE[@]}" "$SCI_ENV/bin/python" -B "$FAST_START" \
-        --data-root "$IR_RAMAN_USER_ROOT/data" --logs-root "$SCI_LOGS" "$@"
+        --sci-root "$SCI_ROOT" "$@"
 fi
 
-echo "3/4 Starting Raman Phase Finder..."
+echo "3/4 Starting Raman..."
 export PYTHONDONTWRITEBYTECODE=1
 export PYTHONPATH="$APP_ROOT/Vibrational_Finder${PYTHONPATH+:$PYTHONPATH}"
-export IR_RAMAN_DATA_DIR="$IR_RAMAN_USER_ROOT/data"
-export IR_RAMAN_PHASE_FINDER_CACHE_DIR="$IR_RAMAN_USER_ROOT/data/cache"
-export MPLCONFIGDIR="$IR_RAMAN_USER_ROOT/matplotlib"
+export IR_RAMAN_DATA_DIR="$RAMAN_USER_ROOT/data"
+export IR_RAMAN_PHASE_FINDER_CACHE_DIR="$RAMAN_USER_ROOT/data/cache"
+export MPLCONFIGDIR="$RAMAN_USER_ROOT/matplotlib"
 export IR_RAMAN_PHASE_FINDER_READY_FILE="$READY_FILE"
 export QT_MAC_WANTS_LAYER=1
 export IR_RAMAN_CHECK_UPDATES=1
@@ -91,12 +91,12 @@ APP_PID="$!"
 echo "4/4 Waiting for application window..."
 for _ in {1..120}; do
     if [ -f "$READY_FILE" ]; then
-        echo "Raman Phase Finder is running."
+        echo "Raman is running."
         exit 0
     fi
     if ! kill -0 "$APP_PID" >/dev/null 2>&1; then
         echo
-        echo "Raman Phase Finder exited during startup."
+        echo "Raman exited during startup."
         read "?Press Enter to close..."
         exit 1
     fi

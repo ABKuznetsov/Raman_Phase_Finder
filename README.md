@@ -4,10 +4,18 @@ Open-source desktop software for Raman spectroscopy: phase identification, searc
 
 ## Download and run
 
-- **macOS:** [Download Raman Phase Finder 1.0.0](https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/tag/v1.0.0). Choose the `.pkg` installer under Assets. The launcher prepares the Python environment on first run.
-- **Windows and Linux:** use the [source distribution](https://github.com/ABKuznetsov/Raman_Phase_Finder). Run `run_finder.bat` on Windows, or use Python 3.11–3.12 and run `bash setup_env.sh` followed by `bash run_finder.sh` on Linux. The first release includes a macOS installer only.
+- **Windows:** [Download the 1.0.1 installer (.exe)](https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.1/Raman_Phase_Finder_Setup_1.0.1.exe), or run `run_finder.bat` from the [source distribution](https://github.com/ABKuznetsov/Raman_Phase_Finder).
+- **macOS:** [Download version 1.0.0](https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/tag/v1.0.0). Choose the `.pkg` installer under Assets. The launcher prepares the Python environment on first run.
+- **Linux:** use the source distribution with Python 3.11–3.12. Run `bash setup_env.sh` followed by `bash run_finder.sh`.
 
-The app checks for updates after opening. You can also check from **Help → Check for updates**. Downloads and releases are published in this repository.
+The Windows installer requires administrator approval and installs into
+`%ProgramFiles%\Raman Phase Finder`. The shared Python environment stays in
+`%LocalAppData%\Sci\env`; each user has databases, reference cards and settings
+under `Sci\apps\Raman Phase Finder` and logs under `Sci\logs\Raman Phase Finder`. On upgrade, close the
+old app before starting the new one so the existing data can be moved.
+If both data directories already exist, the existing files are left intact.
+
+The app checks for updates after opening. You can also check from **Help → Check for updates**. On Windows, confirm **Download and install** to start the installer after the download is verified. Version 1.0.0 can find updates but opens the release page; install 1.0.1 manually once to enable the new flow.
 
 The current source uses the Raman-only project format `.rpff`. It includes the spectra and the settings needed to reconstruct the analysis, without embedding exported figures. To open an older `.irff` project, use the version that created it. You can import the original Raman measurements into a new project. Updating the program does not rewrite existing project files or clear your reference libraries.
 

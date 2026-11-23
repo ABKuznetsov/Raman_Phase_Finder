@@ -1,13 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import filecmp
 from pathlib import Path
 import re
-import shutil
 import ssl
+from typing import BinaryIO
+from urllib.error import HTTPError
 import urllib.request
 import zipfile
 
+from vibrational_finder.cancellation import JobCancelled, checkpoint
 from vibrational_finder.core.cache import app_cache_dir
 from vibrational_finder.core.data_sources import SourceQuery
 from vibrational_finder.core.models import CandidateRecord, SignalKind
@@ -29,6 +32,7 @@ RRUFF_RAMAN_ARCHIVES = {
 }
 
 RRUFF_BAND_RECIPE_VERSION = "arpls-savgol-ramanchada2-topo-normalized-v1"
+RRUFF_DOWNLOAD_PAGE = "https://www.rruff.net/about/download-data/"
 
 
 @dataclass(slots=True)
@@ -45,6 +49,12 @@ class RruffArchiveInfo:
     @property
     def is_cached(self) -> bool:
         return self.path.exists()
+
+
+class RruffDownloadBlocked(RuntimeError):
+    def __init__(self, archive: RruffArchiveInfo) -> None:
+        self.archive = archive
+        super().__init__("RRUFF refused the automatic download (HTTP 403).")
 
 
 class RruffSource:
@@ -68,30 +78,77 @@ class RruffSource:
     def cached_archive_keys(self) -> list[str]:
         return [info.key for info in self.available_archives() if info.is_cached]
 
+    def _archive(self, key: str) -> RruffArchiveInfo:
+        for info in self.available_archives():
+            if info.key == key:
+                return info
+        raise ValueError(f"Unknown RRUFF archive: {key}")
+
     def download_archive(self, key: str = "fair_oriented") -> Path:
-        archives = {info.key: info for info in self.available_archives()}
-        if key not in archives:
-            raise ValueError(f"Unknown RRUFF archive: {key}")
-        info = archives[key]
+        info = self._archive(key)
+        try:
+            response = urllib.request.urlopen(info.url, timeout=60, context=self._ssl_context())
+        except HTTPError as exc:
+            if exc.code == 403:
+                exc.close()
+                raise RruffDownloadBlocked(info) from exc
+            raise
+        with response:
+            return self._save_archive(info, response)
+
+    def import_archive(self, key: str, path: str | Path) -> Path:
+        info = self._archive(key)
+        local_path = Path(path)
+        # Reject a differently named official package selected by mistake.
+        local_name = re.sub(r" \(\d+\)(?=\.zip$)", "", local_path.name, flags=re.IGNORECASE).casefold()
+        for other in self.available_archives():
+            if other.key != key and local_name == other.url.rsplit("/", 1)[-1].casefold():
+                raise ValueError(f"{local_path.name} is the {other.label} package. Select that package first.")
+        with local_path.open("rb") as handle:
+            return self._save_archive(info, handle, require_rruff_ids=True)
+
+    def _save_archive(self, info: RruffArchiveInfo, stream: BinaryIO, *, require_rruff_ids: bool = False) -> Path:
         target = info.path
-        target.parent.mkdir(parents=True, exist_ok=True)
-        request_kwargs = {"timeout": 60}
-        context = self._ssl_context()
-        if context is not None:
-            request_kwargs["context"] = context
         tmp_path = target.with_suffix(target.suffix + ".part")
-        with urllib.request.urlopen(info.url, **request_kwargs) as response:
+        try:
             with tmp_path.open("wb") as handle:
-                shutil.copyfileobj(response, handle)
-        tmp_path.replace(target)
-        self.refresh_index(force=True)
+                while chunk := stream.read(1024 * 1024):
+                    checkpoint()
+                    handle.write(chunk)
+            checkpoint()
+            if target.is_file() and filecmp.cmp(tmp_path, target, shallow=False):
+                return target
+            try:
+                with zipfile.ZipFile(tmp_path) as archive:
+                    if not any(
+                        self._looks_like_spectrum(name)
+                        and (not require_rruff_ids or re.search(r"\bR\d{6}\b", Path(name).name.replace("_", " "), re.I))
+                        for name in archive.namelist()
+                    ):
+                        raise ValueError("RRUFF archive contains no recognized Raman spectra.")
+            except zipfile.BadZipFile as exc:
+                raise ValueError("The RRUFF archive is not a valid ZIP file.") from exc
+            tmp_path.replace(target)
+            self.reference_cache.clear_archive(info.key)
+            self.refresh_index()
+        finally:
+            tmp_path.unlink(missing_ok=True)
         return target
+
+    @staticmethod
+    def _remove_archive_files(info: RruffArchiveInfo) -> None:
+        info.path.unlink(missing_ok=True)
+        info.path.with_suffix(info.path.suffix + ".part").unlink(missing_ok=True)
+
+    def clear_package(self, key: str) -> None:
+        self._remove_archive_files(self._archive(key))
+        self.reference_cache.clear_archive(key)
+        self.refresh_index()
 
     def clear(self) -> None:
         """Remove managed downloads and indexes while preserving unrelated files."""
         for info in self.available_archives():
-            info.path.unlink(missing_ok=True)
-            info.path.with_suffix(info.path.suffix + ".part").unlink(missing_ok=True)
+            self._remove_archive_files(info)
         self._records = []
         self._archive_by_record_key = {}
         self.reference_cache.clear_band_index(self.name)
@@ -140,30 +197,34 @@ class RruffSource:
         self._archive_by_record_key = {}
         cached_archives = {info.path.stem: info.path for info in self.available_archives() if info.path.exists()}
         cached_records = self.reference_cache.search(SourceQuery(), sources=[self.name], limit=100000)
-        indexed_archives = {str(record.metadata.get("archive", "")) for record in cached_records}
-        indexed_archives.discard("")
-        if not force and cached_records and indexed_archives == set(cached_archives):
-            self._records = cached_records
-            for record in cached_records:
-                archive_key = str(record.metadata.get("archive", ""))
-                if archive_key in cached_archives:
-                    self._archive_by_record_key[record.key] = cached_archives[archive_key]
-            return
         if not cached_archives:
             self.reference_cache.clear_source(self.name)
             return
-        for removed_archive in indexed_archives - set(cached_archives):
-            self.reference_cache.clear_archive(removed_archive)
+        indexed_archives = {str(record.metadata.get("archive", "")) for record in cached_records} - {""}
+        obsolete = indexed_archives if force else indexed_archives - set(cached_archives)
+        for archive_key in obsolete:
+            self.reference_cache.clear_archive(archive_key)
+        retained = indexed_archives - obsolete
+        for record in cached_records:
+            archive_key = record.metadata.get("archive", "")
+            if archive_key in retained:
+                self._records.append(record)
+                self._archive_by_record_key[record.key] = cached_archives[archive_key]
+        first_new = len(self._records)
         for archive_key, archive_path in cached_archives.items():
+            if archive_key in retained:
+                continue
             info = next(info for info in self.available_archives() if info.path == archive_path)
             self._index_archive(info.path, info.kind)
-        self.reference_cache.upsert_records(self._records)
+        if len(self._records) > first_new:
+            self.reference_cache.upsert_records(self._records[first_new:])
 
     def _index_archive(self, archive_path: Path, kind: SignalKind) -> None:
         try:
             with zipfile.ZipFile(archive_path) as archive:
                 names = [name for name in archive.namelist() if self._looks_like_spectrum(name)]
                 for name in names:
+                    checkpoint()
                     text = self._member_header_text(archive, name)
                     record = self._record_from_member(name, kind, archive_path.stem, text)
                     self._records.append(record)
@@ -303,6 +364,7 @@ class RruffSource:
                 continue
             with archive:
                 for record in records:
+                    checkpoint()
                     try:
                         member = record.metadata.get("member", "")
                         text = archive.read(member).decode("utf-8", errors="ignore")
@@ -331,6 +393,8 @@ class RruffSource:
                             self.reference_cache.upsert_band_sets(pending, RRUFF_BAND_RECIPE_VERSION)
                             pending.clear()
                         indexed += 1
+                    except JobCancelled:
+                        raise
                     except Exception:
                         skipped += 1
         if pending:

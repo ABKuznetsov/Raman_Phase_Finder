@@ -3,13 +3,15 @@ from __future__ import annotations
 from dataclasses import asdict
 from html import escape
 import json
+from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QSettings, QSize, Signal, Qt, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtGui import QAction, QDesktopServices
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QFileDialog,
     QFrame,
     QGridLayout,
@@ -18,6 +20,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QMenu,
     QMessageBox,
     QPushButton,
     QScrollArea,
@@ -36,6 +39,9 @@ from vibrational_finder.services.spectroscopy_source_catalog import ProjectRefer
 from vibrational_finder.services.user_reference_store import UserReferenceStore
 from vibrational_finder.ui.rest_connection_dialog import RestConnectionDialog
 from vibrational_finder.ui.user_reference_library import UserReferenceLibraryDialog
+
+if TYPE_CHECKING:
+    from vibrational_finder.services.rruff_source import RruffArchiveInfo
 
 
 _REMOTE_LIBRARIES_SETTING = "sources/remote_catalogs_v1"
@@ -67,14 +73,15 @@ class SourceOverviewTable(QTableWidget):
 
 
 class SourceActionCard(QFrame):
-    def __init__(self, name: str, description: str) -> None:
+    def __init__(self, name: str, description: str, *, columns: int = 2) -> None:
         super().__init__()
         self.name = name
         self.setProperty("databaseGroup", True)
         self.grid = QGridLayout(self)
         self.grid.setContentsMargins(8, 7, 8, 8)
-        self.grid.setColumnStretch(0, 1)
-        self.grid.setColumnStretch(1, 1)
+        self._columns = columns
+        for column in range(columns):
+            self.grid.setColumnStretch(column, 1)
         title = QLabel(name)
         title.setTextFormat(Qt.TextFormat.PlainText)
         title.setProperty("uiRole", "sectionTitle")
@@ -89,43 +96,67 @@ class SourceActionCard(QFrame):
         info.setToolTip(description)
         info.clicked.connect(lambda: QToolTip.showText(info.mapToGlobal(info.rect().bottomLeft()), description, info))
         heading.addWidget(info)
-        self.grid.addLayout(heading, 0, 0, 1, 2)
+        self._options = QToolButton(self)
+        self._options.setText("⋯")
+        self._options.setProperty("databaseHelp", True)
+        self._options.setObjectName("sourceOptionsButton")
+        self._options.setFixedSize(24, 20)
+        self._options.setAccessibleName(f"{name}: More options")
+        self._options.setToolTip("More options")
+        self._options.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+        self._menu = QMenu(self._options)
+        self._options.setMenu(self._menu)
+        self._options.hide()
+        heading.addWidget(self._options)
+        self.grid.addLayout(heading, 0, 0, 1, columns)
         detail = QLabel(description)
         detail.setTextFormat(Qt.TextFormat.PlainText)
         detail.setProperty("uiRole", "muted")
         detail.setWordWrap(True)
-        self.grid.addWidget(detail, 1, 0, 1, 2)
+        self.grid.addWidget(detail, 1, 0, 1, columns)
         self.actions: dict[str, QPushButton] = {}
+        self.menu_actions: dict[str, QAction] = {}
         self.packages = QComboBox(self)
         self.packages.setAccessibleName(f"{name} package")
         self.packages.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
         self.packages.hide()
-        self.grid.addWidget(self.packages, 2, 0, 1, 2)
+        self.grid.addWidget(self.packages, 2, 0, 1, columns)
 
     def add_action(self, key: str, label: str, callback, *, available: bool = True) -> QPushButton:
-        offset, column = divmod(len(self.actions), 2)
+        offset, column = divmod(len(self.actions), self._columns)
         button = QPushButton(label)
         button.setAccessibleName(f"{self.name}: {label}")
         button.setProperty("available", available)
-        if key in {"update", "add_reference"}:
+        if key == "download":
+            button.setProperty("databaseAction", "download")
+        elif key == "add_reference":
             button.setProperty("databaseAction", "emphasis")
-        elif key in {"clear", "clear_index"}:
+        elif key == "clear":
             button.setProperty("databaseAction", "clear")
         button.clicked.connect(lambda _checked=False: callback())
         self.grid.addWidget(button, offset + 3, column)
         self.actions[key] = button
         return button
 
+    def add_option(self, key: str, label: str, callback, *, available: bool = True) -> None:
+        action = self._menu.addAction(label)
+        action.setProperty("available", available)
+        action.triggered.connect(lambda _checked=False: callback())
+        self.menu_actions[key] = action
+        self._options.show()
+
     def set_busy(self, busy: bool) -> None:
-        for key, button in self.actions.items():
-            button.setEnabled(bool(button.property("available")) and (not busy or key in {"website", "manage"}))
+        for actions in (self.actions, self.menu_actions):
+            for key, action in actions.items():
+                action.setEnabled(bool(action.property("available")) and (not busy or key in {"website", "manage"}))
         self.packages.setEnabled(not busy)
 
 
 class SourceSettingsPanel(QWidget):
     sourcesChanged = Signal()
     updateRequested = Signal(str, str)
-    clearCacheRequested = Signal(str)
+    importArchiveRequested = Signal(str, str, str)
+    clearCacheRequested = Signal(str, str)
     buildIndexRequested = Signal(str)
     clearIndexRequested = Signal(str)
 
@@ -300,7 +331,7 @@ class SourceSettingsPanel(QWidget):
 
     def _place_source_cards(self, *, force: bool = False) -> None:
         cards = [self._connections_card, *self.source_action_cards.values()]
-        count = min(len(cards), max(1, min(5, (self.width() - 20) // 255)))
+        count = min(len(cards), max(1, min(5, (self.width() - 20) // 275)))
         if not force and self._card_column_count == count:
             return
         self._card_column_count = count
@@ -362,8 +393,8 @@ class SourceSettingsPanel(QWidget):
             "Remote spectroscopy library with a local cache." if descriptor.remote_url
             else "Local reference data connected to this Finder."
         )
-        card = SourceActionCard(name, description)
         if name == USER_LIBRARY_NAME:
+            card = SourceActionCard(name, description)
             card.add_action("add_reference", "Add reference…", self.add_reference)
             card.add_action("manage", "Manage…", self.manage_user_library)
             return card
@@ -373,35 +404,55 @@ class SourceSettingsPanel(QWidget):
         except Exception:
             # The source error is reported in its overview row.
             capabilities = None
+        downloadable = capabilities is not None and capabilities.can_update
+        card = SourceActionCard(name, description, columns=3 if downloadable else 2)
         if capabilities is not None:
             for package in capabilities.packages:
                 suffix = " (cached)" if package.cached else ""
                 card.packages.addItem(f"{package.label}{suffix}", package.key)
             if capabilities.packages:
-                card.packages.setCurrentIndex(max(0, card.packages.findData(selected_package)))
+                index = card.packages.findData(selected_package)
+                if index < 0:
+                    index = next((i for i, package in enumerate(capabilities.packages) if package.cached), 0)
+                card.packages.setCurrentIndex(index)
                 card.packages.show()
-            if capabilities.can_update:
-                label = "Update…" if any(package.cached for package in capabilities.packages) else "Download…"
-                card.add_action("update", label, lambda: self.updateRequested.emit(
+            if downloadable:
+                def request_download() -> None:
+                    self.updateRequested.emit(name, str(card.packages.currentData() or ""))
+
+                card.add_action("download", "Download", request_download)
+                card.add_action("update", "Update", request_download)
+                card.add_action("clear", "Delete", lambda: self._request_clear_cache(
+                    name, str(card.packages.currentData() or ""), card.packages.currentText(),
+                ))
+
+                def update_package_actions() -> None:
+                    selected = card.packages.currentIndex()
+                    cached = selected >= 0 and capabilities.packages[selected].cached
+                    for key, available in (("download", not cached), ("update", cached),
+                                           ("clear", cached and capabilities.can_clear)):
+                        card.actions[key].setProperty("available", available)
+                    card.set_busy(self._operation_running)
+
+                card.packages.currentIndexChanged.connect(update_package_actions)
+                update_package_actions()
+            if name == "RRUFF":
+                card.add_option("import", "Import downloaded ZIP…", lambda: self._choose_rruff_archive(
                     name, str(card.packages.currentData() or ""),
                 ))
             if capabilities.can_build_index:
                 available = not descriptor.remote_url or any(package.cached for package in capabilities.packages)
-                card.add_action("build_index", "Build index", lambda: self.buildIndexRequested.emit(name),
+                card.add_option("build_index", "Build index", lambda: self.buildIndexRequested.emit(name),
                                 available=available)
-                if not available:
-                    card.actions["build_index"].setToolTip("Download this catalog first.")
-            if capabilities.can_clear:
-                card.add_action("clear", "Clear cache…", lambda: self._request_clear_cache(name))
             if capabilities.can_clear_index:
-                card.add_action("clear_index", "Clear index…", lambda: self._request_clear_index(name))
+                card.add_option("clear_index", "Clear index…", lambda: self._request_clear_index(name))
         if descriptor.website:
-            card.add_action("website", "Source page", lambda: QDesktopServices.openUrl(QUrl(descriptor.website)))
+            card.add_option("website", "Source page", lambda: QDesktopServices.openUrl(QUrl(descriptor.website)))
         if descriptor.rest_connection is not None:
-            card.add_action("edit", "Edit API…", lambda: self._configure_rest_library(descriptor.rest_connection))
+            card.add_option("edit", "Edit API…", lambda: self._configure_rest_library(descriptor.rest_connection))
         if descriptor.remote_url:
-            card.add_action("disconnect", "Disconnect…", lambda: self._disconnect_url_library(name))
-        if not card.actions:
+            card.add_option("disconnect", "Disconnect…", lambda: self._disconnect_url_library(name))
+        if not card.actions and not card.menu_actions:
             hint = QLabel("No local management actions.")
             hint.setWordWrap(True)
             card.grid.addWidget(hint, 3, 0, 1, 2)
@@ -425,9 +476,43 @@ class SourceSettingsPanel(QWidget):
             QMessageBox.StandardButton.No,
         ) == QMessageBox.StandardButton.Yes
 
-    def _request_clear_cache(self, name: str) -> None:
-        if self._confirm("Clear source cache", f"Delete downloaded cache files for {name}?"):
-            self.clearCacheRequested.emit(name)
+    def _request_clear_cache(self, name: str, package_key: str, package_label: str) -> None:
+        label = package_label.removesuffix(" (cached)")
+        target = f"{name}: {label}" if label else name
+        if self._confirm("Delete database package", f"Delete the local download and index for {target}?"):
+            self.clearCacheRequested.emit(name, package_key)
+
+    def _choose_rruff_archive(self, name: str, package_key: str, filename: str = "") -> None:
+        path, _filter = QFileDialog.getOpenFileName(
+            self, f"Select downloaded RRUFF ZIP ({filename})" if filename else "Select downloaded RRUFF ZIP",
+            "", "ZIP archives (*.zip)",
+        )
+        if path:
+            self.importArchiveRequested.emit(name, package_key, path)
+
+    def offer_rruff_archive(self, name: str, archive: RruffArchiveInfo) -> None:
+        self.set_operation_failed(name, "update", "Automatic download refused (HTTP 403). Import a downloaded ZIP.")
+        filename = archive.url.rsplit("/", 1)[-1]
+        dialog = QDialog(self)
+        dialog.setWindowTitle("RRUFF download")
+        layout = QVBoxLayout(dialog)
+        message = QLabel(f"RRUFF refused the automatic download (HTTP 403).\n\n"
+                         f"Open the official download in your browser, then select {filename}.")
+        message.setTextFormat(Qt.TextFormat.PlainText)
+        message.setWordWrap(True)
+        layout.addWidget(message)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel)
+        browser = buttons.addButton("Open in browser", QDialogButtonBox.ButtonRole.ActionRole)
+        browser.clicked.connect(lambda: QDesktopServices.openUrl(QUrl(archive.url)))
+        buttons.addButton("Choose ZIP…", QDialogButtonBox.ButtonRole.AcceptRole)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+        dialog.resize(460, dialog.sizeHint().height())
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        dialog.deleteLater()
+        if accepted:
+            self._choose_rruff_archive(name, archive.key, filename)
 
     def _request_clear_index(self, name: str) -> None:
         if self._confirm("Clear line index", f"Delete the derived line index for {name}?"):
@@ -435,7 +520,8 @@ class SourceSettingsPanel(QWidget):
 
     def set_operation_pending(self, name: str, operation: str) -> None:
         labels = {
-            "update": "Updating",
+            "update": "Downloading and preparing",
+            "import_archive": "Importing and indexing",
             "clear": "Clearing cache",
             "build_index": "Building line index",
             "clear_index": "Clearing line index",
@@ -519,7 +605,7 @@ class SourceSettingsPanel(QWidget):
             self.operation_status.setText(str(exc))
             return
         self._show_connected_library(
-            name, "Catalog connected. Download it, build the index, then tick to use it in search.",
+            name, "Catalog connected. Download it, then enable it for search.",
         )
 
     def _choose_rest_library(self) -> None:
@@ -535,7 +621,7 @@ class SourceSettingsPanel(QWidget):
         name = self.catalog.add_rest_library(connection)
         self._show_connected_library(
             name,
-            "REST mapping saved. Download / update to fetch it, then build the local index.",
+            "REST mapping saved. Download or update the catalog to prepare it for search.",
         )
 
     def _show_connected_library(self, name: str, message: str) -> None:

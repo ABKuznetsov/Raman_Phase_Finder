@@ -44,7 +44,7 @@ class PhaseLegendEntry:
 class _LegendText(pg.TextItem):
     def __init__(self, rows, entries, color, *, font_size, text_color, anchor, on_move=None) -> None:
         super().__init__("", anchor=anchor, fill=pg.mkBrush(255, 255, 255, 230),
-                         border=pg.mkPen(color, width=0.8))
+                         border=pg.mkPen(color, width=0.8, cosmetic=False))
         self.legend_entries = tuple(entries)
         phase_html, self._swatches = _phase_html(self.legend_entries, text_color)
         if phase_html:
@@ -84,7 +84,8 @@ class _LegendText(pg.TextItem):
                             origin = self.textItem.mapToParent(layout.position())
                             y = origin.y() + line.y() + line.height() * .55
                             x = origin.x() + (left + right) / 2
-                            painter.setPen(pg.mkPen(color, width=1.3, style=styles.get(kind, Qt.PenStyle.SolidLine)))
+                            painter.setPen(pg.mkPen(color, width=1.3, cosmetic=False,
+                                                    style=styles.get(kind, Qt.PenStyle.SolidLine)))
                             if kind == "marker":
                                 painter.setBrush(pg.mkBrush(color))
                                 painter.drawEllipse(QPointF(x, y), 3, 3)

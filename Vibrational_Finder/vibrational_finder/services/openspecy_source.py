@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import filecmp
 from importlib.util import find_spec
 from pathlib import Path
 import shutil
@@ -14,7 +15,9 @@ from vibrational_finder.core.cache import app_cache_dir
 from vibrational_finder.core.data_sources import SourceQuery
 from vibrational_finder.core.models import CandidateRecord, SignalKind
 from vibrational_finder.band_detection import BandDetectionOptions, detect_bands, extract_reference_band_set
+from vibrational_finder.cancellation import JobCancelled, checkpoint
 from vibrational_finder.models import CompoundCandidate, ReferenceBandSet, ReferenceSpectrum, SpectralBand
+from vibrational_finder.services.openspecy_profile_cache import archive_stamp, profile_cache_path, read_profile, write_profiles
 from vibrational_finder.services.reference_cache import ReferenceSpectrumCache
 
 
@@ -67,8 +70,8 @@ class OpenSpecyLibrarySource:
         self.reference_cache = ReferenceSpectrumCache(self.cache_root)
         self._records: list[CandidateRecord] = []
         self._decoder_error = ""
-        self._rds_cache: dict[str, dict] = {}
-        self._rds_failures: dict[str, tuple[type[Exception], str]] = {}
+        self._rds_cache: dict[tuple[Path, str], dict] = {}
+        self._rds_failures: dict[tuple[Path, str], tuple[type[Exception], str]] = {}
         self._ssl_context = self._create_ssl_context()
         self.refresh_index()
 
@@ -96,17 +99,35 @@ class OpenSpecyLibrarySource:
         request_kwargs = {"timeout": 120}
         if self._ssl_context is not None:
             request_kwargs["context"] = self._ssl_context
-        with urllib.request.urlopen(info.url, **request_kwargs) as response:
-            with tmp_path.open("wb") as handle:
+        try:
+            with urllib.request.urlopen(info.url, **request_kwargs) as response, tmp_path.open("wb") as handle:
                 shutil.copyfileobj(response, handle)
-        tmp_path.replace(info.path)
-        self.refresh_index(force=True)
+            checkpoint()
+            if info.path.is_file() and filecmp.cmp(tmp_path, info.path, shallow=False):
+                return info.path
+            tmp_path.replace(info.path)
+            self.refresh_index(updated_library=key)
+        finally:
+            tmp_path.unlink(missing_ok=True)
         return info.path
+
+    @staticmethod
+    def _remove_library_files(info: OpenSpecyLibraryInfo) -> None:
+        info.path.unlink(missing_ok=True)
+        info.path.with_suffix(info.path.suffix + ".part").unlink(missing_ok=True)
+        profile_cache_path(info.path).unlink(missing_ok=True)
+
+    def clear_package(self, key: str) -> None:
+        for info in self.available_libraries():
+            if info.key == key:
+                self._remove_library_files(info)
+                self.refresh_index()
+                return
+        raise ValueError(f"Unknown OpenSpecy library: {key}")
 
     def clear(self) -> None:
         for info in self.available_libraries():
-            info.path.unlink(missing_ok=True)
-            info.path.with_suffix(info.path.suffix + ".part").unlink(missing_ok=True)
+            self._remove_library_files(info)
         self._records = []
         self._decoder_error = ""
         self._rds_cache = {}
@@ -148,7 +169,7 @@ class OpenSpecyLibrarySource:
         row[3] = str(count)
         return row
 
-    def refresh_index(self, *, force: bool = False) -> None:
+    def refresh_index(self, *, force: bool = False, updated_library: str | None = None) -> None:
         self._records = []
         self._decoder_error = ""
         self._rds_cache = {}
@@ -161,7 +182,7 @@ class OpenSpecyLibrarySource:
         indexed_records = self.reference_cache.search(SourceQuery(), sources=[self.name], limit=-1)
         indexed_keys = {str(record.metadata.get("library", "")) for record in indexed_records}
         indexed_keys.discard("")
-        if not force and indexed_records and indexed_keys == cached_keys:
+        if not force and updated_library is None and indexed_records and indexed_keys == cached_keys:
             self._records = indexed_records
             return
         previous = {}
@@ -170,14 +191,17 @@ class OpenSpecyLibrarySource:
         replaced_keys = {record.key for key, records in previous.items() if key not in cached_keys for record in records}
         rebuilt = []
         for info in cached:
+            checkpoint()
             old_records = previous.get(info.key, [])
-            if not force and old_records:
+            if not force and info.key != updated_library and old_records:
                 self._records.extend(old_records)
                 continue
             try:
                 fresh_records = self._records_from_rds(info)
                 if not fresh_records:
                     raise OpenSpecyArchiveError(f"No readable spectra metadata in {info.filename}")
+            except JobCancelled:
+                raise
             except Exception as exc:
                 self._decoder_error = str(exc)
                 self._records.extend(old_records)
@@ -192,9 +216,11 @@ class OpenSpecyLibrarySource:
             self.reference_cache.upsert_records(rebuilt)
 
     def _records_from_rds(self, info: OpenSpecyLibraryInfo) -> list[CandidateRecord]:
+        stamp = archive_stamp(info.path)
         result = self._load_rds(info.path)
         records: list[CandidateRecord] = []
         if self._is_openspecy_object(result):
+            write_profiles(info.path, stamp, result["wavenumber"], result["spectra"])
             metadata = result["metadata"]
             columns = {str(column).lower(): column for column in metadata.columns}
             sample_column = _first_column(columns, ["sample_name", "col_id"])
@@ -283,15 +309,22 @@ class OpenSpecyLibrarySource:
         path = self.cache_root / library[1] if library else Path(candidate.metadata.get("path", ""))
         if not path.is_file():
             raise FileNotFoundError(str(path))
-        result = self._load_rds(path)
-        if not self._is_openspecy_object(result):
-            raise NotImplementedError("OpenSpecy RDS object does not expose wavenumber/spectra arrays.")
         sample_name = candidate.metadata.get("sample_name", "")
-        spectra = result["spectra"]
-        if sample_name not in spectra.columns:
-            raise KeyError(f"OpenSpecy spectrum column not found: {sample_name}")
-        x = np.asarray(result["wavenumber"], dtype=float).reshape(-1)
-        y = np.asarray(spectra[sample_name], dtype=float).reshape(-1)
+        stamp = archive_stamp(path)
+        cached = read_profile(path, stamp, sample_name) if library else None
+        if cached is not None:
+            x, y = cached
+        else:
+            result = self._load_rds(path)
+            if not self._is_openspecy_object(result):
+                raise NotImplementedError("OpenSpecy RDS object does not expose wavenumber/spectra arrays.")
+            spectra = result["spectra"]
+            if sample_name not in spectra.columns:
+                raise KeyError(f"OpenSpecy spectrum column not found: {sample_name}")
+            x = np.asarray(result["wavenumber"], dtype=float).reshape(-1)
+            y = np.asarray(spectra[sample_name], dtype=float).reshape(-1)
+            if library and x.size == y.size:
+                write_profiles(path, stamp, x, spectra)
         if x.size != y.size:
             raise OpenSpecyArchiveError("OpenSpecy spectrum and wavenumber axis have different lengths")
         finite = np.isfinite(x) & np.isfinite(y)
@@ -337,6 +370,7 @@ class OpenSpecyLibrarySource:
             fit_peaks=False,
         )
         for record in self._records:
+            checkpoint()
             if record.key in indexed_keys or (kind is not None and record.kind != kind):
                 continue
             try:
@@ -364,6 +398,8 @@ class OpenSpecyLibrarySource:
                     self.reference_cache.upsert_band_sets(pending, OPENSPECY_BAND_RECIPE_VERSION)
                     pending.clear()
                 indexed += 1
+            except JobCancelled:
+                raise
             except Exception:
                 skipped += 1
         if pending:
@@ -435,7 +471,7 @@ class OpenSpecyLibrarySource:
         return ssl.create_default_context(cafile=certifi.where())
 
     def _load_rds(self, path: Path) -> dict:
-        cache_key = str(path)
+        cache_key = (path, archive_stamp(path))
         if cache_key in self._rds_cache:
             return self._rds_cache[cache_key]
         if cache_key in self._rds_failures:

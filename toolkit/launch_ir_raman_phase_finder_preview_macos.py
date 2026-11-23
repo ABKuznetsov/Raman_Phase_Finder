@@ -17,9 +17,10 @@ if str(PACKAGE_ROOT) not in sys.path:
     sys.path.insert(0, str(PACKAGE_ROOT))
 
 from vibrational_finder.macos_runtime import native_python_command, runtime_is_usable
+from vibrational_finder.core.app_paths import default_sci_root, raman_app_root, raman_logs_root
+from vibrational_finder.metadata import APP_NAME
 
 
-APP_NAME = "Raman Phase Finder"
 MIN_VISIBLE_STEP_SECONDS = 0.8
 
 
@@ -37,12 +38,12 @@ def load_json(path: Path) -> dict:
 class PreviewApp:
     def __init__(self) -> None:
         self.app_root = app_root()
-        self.sci_root = Path(os.environ.get("IR_RAMAN_SCI_ROOT") or Path.home() / "Library" / "Application Support" / "Sci")
+        self.sci_root = default_sci_root()
         self.env_root = self.sci_root / "env"
         self.apps_root = self.sci_root / "apps"
-        self.finder_root = self.apps_root / "ir_raman_analysis_toolkit"
+        self.finder_root = raman_app_root(self.sci_root)
         self.data_root = self.finder_root / "data"
-        self.logs_root = self.sci_root / "logs"
+        self.logs_root = raman_logs_root(self.sci_root)
         self.matplotlib_root = self.finder_root / "matplotlib"
         self.python = self.env_root / "bin" / "python"
         self.setup_script = self.app_root / "toolkit" / "setup_sci_env.command"
@@ -155,7 +156,7 @@ class PreviewApp:
             if not self.setup_script.exists():
                 raise RuntimeError(f"Setup script was not found: {self.setup_script}")
             self.set_step(1, "Installing...", "Configuring compatible Python packages")
-            setup_log = self.logs_root / "ir_raman_setup.log"
+            setup_log = self.logs_root / "setup.log"
             process = subprocess.Popen([str(self.setup_script)], cwd=str(self.app_root))
             while process.poll() is None:
                 self.set_step(1, "Installing...", self._setup_progress(setup_log))
@@ -163,7 +164,7 @@ class PreviewApp:
             if process.returncode:
                 raise RuntimeError(f"Environment setup failed. See log: {setup_log}")
         if not runtime_is_usable(self.python):
-            raise RuntimeError(f"Sci Python environment is not usable. See log: {self.logs_root / 'ir_raman_setup.log'}")
+            raise RuntimeError(f"Sci Python environment is not usable. See log: {self.logs_root / 'setup.log'}")
         self.set_step(1, "OK", "Runtime and scientific packages are ready", "green")
 
     def _setup_progress(self, log_path: Path) -> str:
@@ -174,7 +175,7 @@ class PreviewApp:
         for marker, message in [
             ("Creating venv", "Creating Sci environment"),
             ("Upgrading pip", "Upgrading pip"),
-            ("Installing Raman Phase Finder requirements", "Installing scientific Python packages"),
+            ("Installing Raman requirements", "Installing scientific Python packages"),
             ("Successfully installed", "Finalizing packages"),
         ]:
             if marker in text:
@@ -189,9 +190,9 @@ class PreviewApp:
 
     def launch_main_app(self) -> None:
         self.set_step(4, "Opening...", "Preparing main application window")
-        ready_file = self.logs_root / "ir_raman_phase_finder_ready.flag"
-        prepared_file = self.logs_root / "ir_raman_phase_finder_prepared.flag"
-        show_signal_file = self.logs_root / "ir_raman_phase_finder_show.signal"
+        ready_file = self.logs_root / "ready.flag"
+        prepared_file = self.logs_root / "prepared.flag"
+        show_signal_file = self.logs_root / "show.signal"
         for path in [ready_file, prepared_file, show_signal_file]:
             path.unlink(missing_ok=True)
 
@@ -207,7 +208,7 @@ class PreviewApp:
         env["QT_MAC_WANTS_LAYER"] = "1"
         env.setdefault("IR_RAMAN_CHECK_UPDATES", "1")
 
-        log_file = self.logs_root / "ir_raman_phase_finder_console.log"
+        log_file = self.logs_root / "console.log"
         log_handle = log_file.open("w", encoding="utf-8")
         log_handle.write(f"[{time.ctime()}] Starting {APP_NAME} on {platform.platform()}\n")
         log_handle.flush()

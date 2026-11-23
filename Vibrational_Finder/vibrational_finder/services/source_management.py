@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+from vibrational_finder.cancellation import JobCancelled, checkpoint
 from vibrational_finder.core.models import SignalKind
 from vibrational_finder.services.spectroscopy_source_catalog import SpectroscopySourceCatalog
 
@@ -21,6 +23,12 @@ class SourceManagementCapabilities:
     can_build_index: bool = False
     can_clear_index: bool = False
     packages: tuple[SourcePackageOption, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class SourceUpdateResult:
+    package: object
+    index_counts: tuple[int, int] | None = None
 
 
 class SpectroscopySourceManager:
@@ -61,25 +69,54 @@ class SpectroscopySourceManager:
             packages=packages,
         )
 
-    def update(self, name: str, package_key: str | None = None) -> object:
+    def update(self, name: str, package_key: str | None = None) -> SourceUpdateResult:
         source = self.catalog.source(name)
         packages = self.packages(name)
         if package_key is not None and packages and package_key not in {item.key for item in packages}:
             raise ValueError(f"Unknown package for {name}: {package_key}")
         if hasattr(source, "download_library"):
-            return source.download_library(package_key) if package_key is not None else source.download_library()
-        if hasattr(source, "download_archive"):
-            return source.download_archive(package_key) if package_key is not None else source.download_archive()
-        if hasattr(source, "download_metadata"):
+            package = source.download_library(package_key) if package_key is not None else source.download_library()
+        elif hasattr(source, "download_archive"):
+            package = source.download_archive(package_key) if package_key is not None else source.download_archive()
+        elif hasattr(source, "download_metadata"):
             if package_key is not None:
                 raise ValueError(f"{name} does not provide selectable packages")
-            return source.download_metadata()
-        raise RuntimeError(f"{name} does not support cache updates")
+            package = source.download_metadata()
+        else:
+            raise RuntimeError(f"{name} does not support cache updates")
 
-    def clear(self, name: str) -> None:
+        return self._index_download(name, source, package)
+
+    def import_archive(self, name: str, package_key: str, path: str | Path) -> SourceUpdateResult:
+        source = self.catalog.source(name)
+        if not hasattr(source, "import_archive"):
+            raise RuntimeError(f"{name} does not support importing downloaded archives")
+        return self._index_download(name, source, source.import_archive(package_key, path))
+
+    def _index_download(self, name: str, source: Any, package: object) -> SourceUpdateResult:
+        checkpoint()
+        if not hasattr(source, "build_band_index"):
+            return SourceUpdateResult(package)
+        try:
+            return SourceUpdateResult(package, self.build_index(name))
+        except JobCancelled:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"Download saved locally, but indexing failed: {exc}") from exc
+
+    def clear(self, name: str, package_key: str | None = None) -> None:
         source = self.catalog.source(name)
         if not hasattr(source, "clear"):
             raise RuntimeError(f"{name} does not support cache clearing")
+        if package_key is not None:
+            packages = self.packages(name)
+            if package_key not in {item.key for item in packages}:
+                raise ValueError(f"Unknown package for {name}: {package_key}")
+            if hasattr(source, "clear_package"):
+                source.clear_package(package_key)
+                return
+            if len(packages) != 1:
+                raise RuntimeError(f"{name} does not support deleting individual packages")
         source.clear()
 
     def build_index(self, name: str) -> tuple[int, int]:

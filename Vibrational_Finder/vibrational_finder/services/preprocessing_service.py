@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+from functools import cache
+
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 from scipy.ndimage import median_filter
 from scipy.signal import savgol_filter
 
-try:
-    from pybaselines import Baseline
-except Exception:
-    Baseline = None
+@cache
+def _baseline_class():
+    try:
+        from pybaselines import Baseline
+    except Exception:
+        return None
+    return Baseline
 
 
 PYBASELINES_METHODS = {"auto", "arpls", "asls", "snip", "rolling_ball"}
@@ -145,7 +150,8 @@ def _pybaselines_background(
     asymmetry: float = 0.01,
     half_window: int | None = None,
 ) -> np.ndarray:
-    if Baseline is None:
+    baseline_class = _baseline_class()
+    if baseline_class is None:
         return _local_envelope_background(x, y)
     if np.all(np.diff(x) >= 0):
         order = None
@@ -158,7 +164,7 @@ def _pybaselines_background(
     if len(xs) < 15:
         return np.full_like(y, float(np.nanpercentile(y, 5)))
 
-    baseline = Baseline(x_data=xs, check_finite=False)
+    baseline = baseline_class(x_data=xs, check_finite=False)
     selected_lam = float(np.clip(lam if lam is not None else len(ys) ** 2.15, 1.0e2, 1.0e10))
     if method in {"auto", "arpls"}:
         background_sorted, _params = baseline.arpls(ys, lam=selected_lam)

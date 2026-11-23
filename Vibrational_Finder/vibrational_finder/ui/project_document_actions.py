@@ -278,6 +278,18 @@ class ProjectDocumentActionsMixin:
         self._confirmed_project_close = False
         return all(handle.wait() for handle in list(self._project_file_jobs))
 
+    def request_update_install(self, launch) -> bool:
+        if self._project_file_operation == "Save":
+            self._project_file_busy()
+            return False
+
+        def confirmed() -> None:
+            if launch():
+                self._confirmed_project_close = True
+                self.close()
+
+        return self._request_document_replacement("install the update", confirmed)
+
     @staticmethod
     def _set_combo_text(combo, value: str) -> None:
         index = combo.findText(value)

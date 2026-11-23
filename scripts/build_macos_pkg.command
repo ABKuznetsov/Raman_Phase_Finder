@@ -103,7 +103,7 @@ $ICON_PLIST
     <key>UTExportedTypeDeclarations</key>
     <array><dict>
         <key>UTTypeIdentifier</key><string>com.ramanphasefinder.project</string>
-        <key>UTTypeDescription</key><string>Raman Phase Finder Project</string>
+        <key>UTTypeDescription</key><string>Raman Project</string>
         <key>UTTypeConformsTo</key><array><string>public.data</string></array>
         <key>UTTypeTagSpecification</key><dict>
             <key>public.filename-extension</key><array><string>rpff</string></array>
@@ -111,7 +111,7 @@ $ICON_PLIST
     </dict></array>
     <key>CFBundleDocumentTypes</key>
     <array><dict>
-        <key>CFBundleTypeName</key><string>Raman Phase Finder Project</string>
+        <key>CFBundleTypeName</key><string>Raman Project</string>
         <key>CFBundleTypeRole</key><string>Editor</string>
         <key>LSHandlerRank</key><string>Owner</string>
         <key>LSItemContentTypes</key><array><string>com.ramanphasefinder.project</string></array>

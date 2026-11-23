@@ -14,6 +14,7 @@ from zipfile import BadZipFile, ZipFile
 
 import certifi
 
+from vibrational_finder.cancellation import checkpoint
 from vibrational_finder.core.cache import app_cache_dir
 from vibrational_finder.core.data_sources import SourceQuery
 from vibrational_finder.core.models import CandidateRecord, SignalKind, SignalTrace
@@ -150,6 +151,7 @@ class OuluRamanSource:
             records: list[CandidateRecord] = []
             sets: list[tuple[str, ReferenceBandSet]] = []
             for item in _archive_records(package.path):
+                checkpoint()
                 item_and_bands = self._parse_record(item)
                 if item_and_bands is None:
                     skipped += 1

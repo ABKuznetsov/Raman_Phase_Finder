@@ -129,7 +129,7 @@ class CandidateWorkspace(QWidget):
         status_row.addWidget(self.score_mode_label)
         self.browse_cancel_button = QPushButton("Cancel")
         self.browse_cancel_button.setObjectName("candidateBrowseCancelButton")
-        self.browse_cancel_button.setToolTip("Cancel database search and keep the last completed results")
+        self.browse_cancel_button.setToolTip("Cancel the reference search")
         self.browse_cancel_button.hide()
         self.browse_cancel_button.clicked.connect(self.cancelRequested)
         status_row.addWidget(self.browse_cancel_button)
@@ -463,11 +463,16 @@ class CandidateWorkspace(QWidget):
     def set_accepted_colors(self, colors: dict[str, str]) -> None:
         if colors == self._accepted_colors:
             return
+        previous = self._accepted_colors
+        changed = {key for key in previous.keys() | colors.keys() if previous.get(key) != colors.get(key)}
         self._accepted_colors = dict(colors)
         for row in range(self.table.rowCount()):
+            key = self.candidate_key_at(row)
+            if key not in changed:
+                continue
             item = self.table.item(row, _COMPOUND_COLUMN)
             if item is not None:
-                self._apply_accepted_color(item, self.candidate_key_at(row))
+                self._apply_accepted_color(item, key)
 
     def _apply_accepted_color(self, item: QTableWidgetItem, key: str | None) -> None:
         color = QColor(self._accepted_colors.get(key or "", ""))
@@ -493,6 +498,8 @@ class CandidateWorkspace(QWidget):
         self.table.setSortingEnabled(sorting)
 
     def _set_status_busy(self, busy: bool) -> None:
+        if not busy:
+            self.browse_cancel_button.hide()
         if self.status_bar.property("searchBusy") == busy:
             return
         self.status_bar.setProperty("searchBusy", busy)
@@ -504,6 +511,7 @@ class CandidateWorkspace(QWidget):
     def set_pending(self, *, gain: bool = False) -> None:
         self.status_label.setText("Updating Gain…" if gain else "Searching spectroscopy references…")
         self._set_status_busy(True)
+        self.browse_cancel_button.setVisible(gain)
         self.match_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
 

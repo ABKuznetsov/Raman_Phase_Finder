@@ -13,6 +13,7 @@ from urllib.request import HTTPSHandler, HTTPRedirectHandler, Request, build_ope
 
 import certifi
 
+from vibrational_finder.cancellation import checkpoint
 from vibrational_finder.core.cache import app_cache_dir
 from vibrational_finder.core.data_sources import SourceQuery
 from vibrational_finder.core.models import CandidateRecord, SignalKind, SignalTrace
@@ -276,6 +277,7 @@ class RemoteCatalogSource:
                 db.execute("insert into catalog_revision values (?, ?, ?)", (snapshot["title"], snapshot["version"], mtime))
                 db.execute("create table catalog_profiles (key text primary key, profile text not null)")
                 for item in snapshot["entries"]:
+                    checkpoint()
                     kind = SignalKind(item["kind"])
                     record = CandidateRecord(
                         key=f"{self.name}:{item['id']}:{kind.value}", source=self.name, entry_id=item["id"],

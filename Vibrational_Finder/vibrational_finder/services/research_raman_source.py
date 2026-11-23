@@ -15,6 +15,7 @@ from urllib.request import urlopen
 import certifi
 import numpy as np
 
+from vibrational_finder.cancellation import checkpoint
 from vibrational_finder.core.cache import app_cache_dir
 from vibrational_finder.core.data_sources import SourceQuery
 from vibrational_finder.core.models import CandidateRecord, SignalKind
@@ -88,7 +89,6 @@ class _ResearchRamanSource:
             partial.replace(package.path)
         finally:
             partial.unlink(missing_ok=True)
-        # Rebuilding the index is a separate, explicit operation.
         self.index_path.unlink(missing_ok=True)
         self.refresh_index()
         return package.path
@@ -171,6 +171,7 @@ class _ResearchRamanSource:
                 band_sets.clear()
 
             for record, x, y in self._spectra(package.path):
+                checkpoint()
                 values = np.asarray(y, dtype="<f4")
                 if values.shape != (len(x),) or not np.all(np.isfinite(values)) or np.ptp(values) <= 0:
                     skipped += 1

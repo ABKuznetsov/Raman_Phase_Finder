@@ -37,6 +37,7 @@ class PlotExportDialog(QDialog):
             PlotExportFormat.SVG,
             canvas_width_px=self.canvas_size_px.width(),
             canvas_height_px=self.canvas_size_px.height(),
+            width_mm=180.0,
         )
 
         self.format_combo = QComboBox()

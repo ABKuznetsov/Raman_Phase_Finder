@@ -12,6 +12,7 @@ from PySide6.QtGui import QFont, QPainterPath
 from PySide6.QtWidgets import QLayout, QVBoxLayout, QWidget
 
 from vibrational_finder.core.models import SignalKind
+from vibrational_finder.metadata import DEFAULT_PLOT_TITLE
 from vibrational_finder.plot_export.metadata import CanvasLayer, canvas_item_tag, tag_canvas_item
 from vibrational_finder.models import ObservedSpectrum, VibrationalMatchResult
 from vibrational_finder.models import SpectralBand
@@ -153,7 +154,7 @@ def create_vibrational_plot_widget() -> pg.PlotWidget:
     plot.setBackground("w")
     plot.showGrid(x=False, y=False)
     plot.setMenuEnabled(False)
-    plot.setTitle("Raman Phase Finder: spectrum and candidate markers", color="#111111", size="13pt")
+    plot.setTitle(DEFAULT_PLOT_TITLE, color="#111111", size="13pt")
     for axis_name in ("bottom", "left"):
         axis = plot.getAxis(axis_name)
         axis.setPen(pg.mkPen("#111111", width=1.2))

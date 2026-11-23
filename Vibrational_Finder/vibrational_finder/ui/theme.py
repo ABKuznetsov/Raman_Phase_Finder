@@ -52,6 +52,10 @@ def theme_colors(dark: bool = False, widget: QWidget | None = None) -> dict[str,
             "button_emphasis": "#3b1724",
             "button_emphasis_hover": "#522034",
             "button_emphasis_border": "#6b2d42",
+            "database_download": "#19362c",
+            "database_download_hover": "#234c3e",
+            "database_download_border": "#3f7966",
+            "database_delete_text": "#ffb6bc",
             **SEMANTIC_COLORS,
         }
     return {
@@ -75,6 +79,10 @@ def theme_colors(dark: bool = False, widget: QWidget | None = None) -> dict[str,
         "button_emphasis": "#f9dfe7",
         "button_emphasis_hover": "#f4ccd8",
         "button_emphasis_border": "#dfa9ba",
+        "database_download": "#def1e8",
+        "database_download_hover": "#cae8d9",
+        "database_download_border": "#a5cdbc",
+        "database_delete_text": "#a0273a",
         **SEMANTIC_COLORS,
     }
 
@@ -154,13 +162,20 @@ def window_style(dark: bool = False) -> str:
         QPushButton:focus, QToolButton:focus, QLineEdit:focus, QComboBox:focus {{ border-color: {BRAND_ACCENT_BORDER}; }}
         QPushButton:disabled, QToolButton:disabled {{ color: {colors['muted']}; background: {colors['bg']}; }}
         QToolButton[databaseHelp="true"] {{ padding: 0; }}
+        QToolButton#sourceOptionsButton::menu-indicator {{ image: none; }}
+        QPushButton[databaseAction="download"]:enabled {{
+            background: {colors['database_download']}; border-color: {colors['database_download_border']}; font-weight: 600;
+        }}
+        QPushButton[databaseAction="download"]:hover:enabled {{ background: {colors['database_download_hover']}; }}
         QPushButton[databaseAction="emphasis"]:enabled {{
             background: {colors['button_emphasis']}; border-color: {colors['button_emphasis_border']}; font-weight: 600;
         }}
         QPushButton[databaseAction="emphasis"]:hover:enabled {{
             background: {colors['button_emphasis_hover']}; border-color: {BRAND_ACCENT_BORDER};
         }}
-        QPushButton[databaseAction="clear"]:enabled {{ border-color: {colors['button_emphasis_border']}; }}
+        QPushButton[databaseAction="clear"]:enabled {{
+            color: {colors['database_delete_text']}; border-color: {colors['button_emphasis_border']};
+        }}
         QPushButton#compositionSearchButton, QPushButton#compositionResetButton {{ background: {colors['button_emphasis']}; border-color: {colors['button_emphasis_border']}; font-weight: 600; }}
         QPushButton#compositionSearchButton:hover:enabled, QPushButton#compositionResetButton:hover:enabled {{ background: {colors['button_emphasis_hover']}; border-color: {BRAND_ACCENT_BORDER}; }}
         QToolButton[plotToggle="true"]:checked {{ background: {colors['selected']}; border-color: {BRAND_ACCENT_BORDER}; }}

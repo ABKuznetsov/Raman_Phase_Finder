@@ -111,8 +111,6 @@ class ResidualSearchController:
             evidence = self.gain_cache.prepare(request.gain_input)
             if not evidence.available:
                 raise ResidualSearchUnavailable("Stable Raman bands could not be evaluated for the accepted references")
-            if not evidence.bands:
-                raise ResidualSearchUnavailable("No meaningful unexplained bands remain for next-component search.")
             search = request.search_request
             options = replace(search.options, matching_options=replace(
                 search.options.matching_options, gain_window=evidence.window,
@@ -121,6 +119,8 @@ class ResidualSearchController:
                 request, evidence_bands=evidence.bands,
                 search_request=replace(search, observed_bands=evidence.bands, options=options),
             )
+            if not evidence.bands:
+                return ResidualSearchOutcome(request, CandidateSearchResult())
         outcome = self.analysis_controller.run(request.search_request)
         return ResidualSearchOutcome(request, outcome.result)
 

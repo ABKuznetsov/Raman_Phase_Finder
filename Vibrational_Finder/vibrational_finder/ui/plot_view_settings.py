@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, fields
 
-from PySide6.QtCore import QSettings, Signal, Qt
+from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
@@ -29,13 +29,14 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from vibrational_finder.metadata import DEFAULT_PLOT_TITLE
 from vibrational_finder.ui.plot_style import PlotLineStyle, PlotMarkerStyle, PlotStyle
 
 
 @dataclass(slots=True)
 class PlotViewSettings:
     title_visible: bool = True
-    title_text: str = "Raman Phase Finder: spectrum and candidate markers"
+    title_text: str = DEFAULT_PLOT_TITLE
     title_font_size: int = 13
     title_color: str = "#111111"
     aspect_ratio: float | None = None
@@ -502,7 +503,7 @@ class PlotViewSettingsWidget(QScrollArea):
         self.title_visible_checkbox = QCheckBox()
         self.title_visible_checkbox.setChecked(True)
         self.title_visible_checkbox.toggled.connect(self._emit_settings)
-        self.title_text_input = QLineEdit("Raman Phase Finder: spectrum and candidate markers")
+        self.title_text_input = QLineEdit(DEFAULT_PLOT_TITLE)
         self.title_text_input.textChanged.connect(self._emit_settings)
         self.title_font_spin = self._spin(8, 24, 13)
         self.title_color_input = QLineEdit("#111111")
@@ -1100,13 +1101,17 @@ class PlotViewSettingsWidget(QScrollArea):
         return cls._DEFAULT_SETTINGS_KEY + ("/finder" if finder_mode else "")
 
     def save_as_default(self) -> None:
-        QSettings("IRRamanPhaseFinder", "Standalone").setValue(
+        from vibrational_finder.ui.app_settings import app_settings
+
+        app_settings().setValue(
             self._default_key(self._finder_mode), json.dumps(asdict(self.settings())),
         )
 
     @classmethod
     def saved_default_settings(cls, *, finder_mode: bool = False) -> PlotViewSettings | None:
-        raw = QSettings("IRRamanPhaseFinder", "Standalone").value(cls._default_key(finder_mode), "", type=str)
+        from vibrational_finder.ui.app_settings import app_settings
+
+        raw = app_settings().value(cls._default_key(finder_mode), "", type=str)
         if not raw:
             return None
         try:

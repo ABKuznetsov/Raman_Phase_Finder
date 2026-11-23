@@ -118,14 +118,15 @@ def default_source_descriptors() -> list[SourceDescriptor]:
     from vibrational_finder.services.oulu_source import OULU_RECORD_URL, OuluRamanSource
     from vibrational_finder.services.research_raman_source import MlrodSource, RamanBenchSource
     from vibrational_finder.services.rod_source import RodSource
-    from vibrational_finder.services.rruff_source import RruffSource
+    from vibrational_finder.services.rruff_source import RRUFF_DOWNLOAD_PAGE, RruffSource
 
     return [
         SourceDescriptor(
             USER_LIBRARY_NAME, (SignalKind.RAMAN,), open_user_reference_library,
             user_managed=True, default_enabled=True,
         ),
-        SourceDescriptor("RRUFF", (SignalKind.RAMAN,), RruffSource, default_enabled=True, local_cache_subdir="rruff"),
+        SourceDescriptor("RRUFF", (SignalKind.RAMAN,), RruffSource, default_enabled=True,
+                         website=RRUFF_DOWNLOAD_PAGE, local_cache_subdir="rruff"),
         SourceDescriptor("ROD", (SignalKind.RAMAN,), RodSource, default_enabled=True, local_cache_subdir="rod"),
         SourceDescriptor("OpenSpecy", (SignalKind.RAMAN,), OpenSpecyLibrarySource,
                          default_enabled=True, local_cache_subdir="openspecy"),

@@ -6,10 +6,8 @@ APP_BUNDLE_NAME="Raman Phase Finder"
 SOURCE_ROOT="$(cd "$(dirname "$0")" && pwd)"
 VERSION="$("$SOURCE_ROOT"/.venv/bin/python -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["version"])' "$SOURCE_ROOT/pyproject.toml" 2>/dev/null || python3 -c 'import sys, tomllib; print(tomllib.load(open(sys.argv[1], "rb"))["project"]["version"])' "$SOURCE_ROOT/pyproject.toml" 2>/dev/null || echo "0.1.7")"
 SCI_ROOT="$HOME/Library/Application Support/Sci"
-INSTALLED_SOURCE_ROOT="$SCI_ROOT/apps/ir_raman_analysis_toolkit/source"
+INSTALLED_SOURCE_ROOT="$SCI_ROOT/apps/Raman Phase Finder/source"
 SCI_ENV="$SCI_ROOT/env"
-IR_RAMAN_USER_ROOT="$SCI_ROOT/apps/ir_raman_analysis_toolkit"
-SCI_LOGS="$SCI_ROOT/logs"
 if [ -n "$IR_RAMAN_INSTALL_DIR" ]; then
     INSTALL_DIR="$IR_RAMAN_INSTALL_DIR"
 elif [ -w "/Applications" ]; then
@@ -22,6 +20,7 @@ CONTENTS_DIR="$APP_BUNDLE/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 LEGACY_BUNDLE_NAMES=(
+    "Raman"
     "IR Raman Phase Finder"
     "IR-Raman Phase Finder"
     "IR_Raman Phase Finder"
@@ -155,7 +154,7 @@ $ICON_PLIST
     <key>UTExportedTypeDeclarations</key>
     <array><dict>
         <key>UTTypeIdentifier</key><string>com.ramanphasefinder.project</string>
-        <key>UTTypeDescription</key><string>Raman Phase Finder Project</string>
+        <key>UTTypeDescription</key><string>Raman Project</string>
         <key>UTTypeConformsTo</key><array><string>public.data</string></array>
         <key>UTTypeTagSpecification</key><dict>
             <key>public.filename-extension</key><array><string>rpff</string></array>
@@ -163,7 +162,7 @@ $ICON_PLIST
     </dict></array>
     <key>CFBundleDocumentTypes</key>
     <array><dict>
-        <key>CFBundleTypeName</key><string>Raman Phase Finder Project</string>
+        <key>CFBundleTypeName</key><string>Raman Project</string>
         <key>CFBundleTypeRole</key><string>Editor</string>
         <key>LSHandlerRank</key><string>Owner</string>
         <key>LSItemContentTypes</key><array><string>com.ramanphasefinder.project</string></array>

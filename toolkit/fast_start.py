@@ -1,4 +1,4 @@
-"""Check an existing runtime cheaply and exec the native IR/Raman window."""
+"""Check an existing runtime cheaply and exec the native Raman window."""
 from __future__ import annotations
 
 import argparse
@@ -9,7 +9,7 @@ import sys
 
 
 NEEDS_SETUP = 75
-CORE_MODULES = ("numpy", "scipy", "pyqtgraph", "PySide6")
+CORE_MODULES = ("numpy", "scipy", "pybaselines", "pyqtgraph", "PySide6")
 ENTRY_MODULE = "vibrational_finder.apps.finder_gui_release"
 
 
@@ -24,20 +24,20 @@ def runtime_ready() -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--probe", action="store_true")
-    parser.add_argument("--data-root", type=Path)
-    parser.add_argument("--logs-root", type=Path)
+    parser.add_argument("--sci-root", type=Path)
     args, arguments = parser.parse_known_args()
     if not runtime_ready():
         return NEEDS_SETUP
     if args.probe:
         return 0
-    if not args.data_root or not args.logs_root:
-        parser.error("--data-root and --logs-root are required")
-
     root = Path(__file__).resolve().parents[1]
+    sources = str(root / "Vibrational_Finder")
+    sys.path.insert(0, sources)
+    from vibrational_finder.core.app_paths import raman_app_root, raman_logs_root
+
     env = os.environ.copy()
-    data = Path(env.get("IR_RAMAN_DATA_DIR") or args.data_root)
-    logs = Path(env.get("IR_RAMAN_LOG_DIR") or args.logs_root)
+    data = Path(env["IR_RAMAN_DATA_DIR"]) if env.get("IR_RAMAN_DATA_DIR") else raman_app_root(args.sci_root) / "data"
+    logs = Path(env.get("IR_RAMAN_LOG_DIR") or raman_logs_root(args.sci_root))
     data.mkdir(parents=True, exist_ok=True)
     logs.mkdir(parents=True, exist_ok=True)
     env.update(PYTHONDONTWRITEBYTECODE="1", IR_RAMAN_DATA_DIR=str(data), IR_RAMAN_LOG_DIR=str(logs))
@@ -45,7 +45,6 @@ def main() -> int:
     env.setdefault("MPLCONFIGDIR", str(data.parent / "matplotlib"))
     env.setdefault("QT_MAC_WANTS_LAYER", "1")
     env.setdefault("IR_RAMAN_CHECK_UPDATES", "1")
-    sources = str(root / "Vibrational_Finder")
     env["PYTHONPATH"] = sources + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     env.pop("IR_RAMAN_PHASE_FINDER_PREPARED_FILE", None)
     env.pop("IR_RAMAN_PHASE_FINDER_SHOW_SIGNAL_FILE", None)

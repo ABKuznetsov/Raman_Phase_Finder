@@ -38,7 +38,7 @@ class PublicationExportActionsMixin:
         path, _selected = QFileDialog.getSaveFileName(
             self,
             "Export publication figure",
-            str(Path(directory) / f"ir_raman_figure.{suffix}"),
+            str(Path(directory) / f"raman_figure.{suffix}"),
             file_filter,
         )
         if not path:

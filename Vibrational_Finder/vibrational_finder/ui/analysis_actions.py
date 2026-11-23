@@ -15,6 +15,7 @@ from vibrational_finder.profile_state import SavedGain
 from vibrational_finder.reference_browse_work import ReferenceBrowseController, ReferenceBrowseOutcome, ReferenceBrowseRequest
 from vibrational_finder.raman_gain import GainWindow, RamanPeakPriority
 from vibrational_finder.services.candidate_search_service import CandidateSearchOptions
+from vibrational_finder.services.source_management import SourceUpdateResult
 from vibrational_finder.ui.analysis_job_controller import AnalysisJobController
 from vibrational_finder.ui.auto_search_setup import AutoSearchSetup, PEAK_PRIORITY_LABELS
 from vibrational_finder.ui.reference_card_actions import ReferenceCardActionsMixin
@@ -67,8 +68,11 @@ class SpectroscopyAnalysisActionsMixin(ReferenceCardActionsMixin):
         self.source_settings_panel.updateRequested.connect(
             lambda name, package: self._start_source_operation(name, "update", package or None)
         )
+        self.source_settings_panel.importArchiveRequested.connect(
+            lambda name, package, path: self._start_source_operation(name, "import_archive", package, local_archive=path)
+        )
         self.source_settings_panel.clearCacheRequested.connect(
-            lambda name: self._start_source_operation(name, "clear")
+            lambda name, package: self._start_source_operation(name, "clear", package or None)
         )
         self.source_settings_panel.buildIndexRequested.connect(
             lambda name: self._start_source_operation(name, "build_index")
@@ -78,6 +82,7 @@ class SpectroscopyAnalysisActionsMixin(ReferenceCardActionsMixin):
         )
         self.source_management_job_controller.pending.connect(self.source_settings_panel.set_operation_pending)
         self.source_management_job_controller.succeeded.connect(self._source_operation_succeeded)
+        self.source_management_job_controller.downloadBlocked.connect(self.source_settings_panel.offer_rruff_archive)
         self.source_management_job_controller.failed.connect(
             lambda name, operation, message, _details: self.source_settings_panel.set_operation_failed(
                 name, operation, message
@@ -241,19 +246,23 @@ class SpectroscopyAnalysisActionsMixin(ReferenceCardActionsMixin):
             excluded_elements=frozenset(item for item, state in self.element_states.items() if state == "excluded"),
         )
 
-    def start_residual_search(self, query_text: str | None = None, *, automatic: bool = False) -> None:
+    def start_residual_search(self, query_text: str | None = None, *, automatic: bool | None = None) -> None:
         self._cancel_analysis_jobs()
+        automatic = self._search_mode == "auto" if automatic is None else automatic
         spectrum = self.active_spectrum()
         if spectrum is None:
             self.candidate_workspace.set_unavailable("Select a Raman spectrum first")
             return
+        profile = self.project.profile_states.get(spectrum.id)
+        if automatic and profile is not None and profile.selected_results:
+            self._set_candidate_gain_context(profile, refresh_scores=False)
+            self.candidate_workspace.set_residual_results([], position_only=True)
         sources = self.source_catalog.enabled_handles(spectrum.kind)
         if not sources:
             self.candidate_workspace.set_unavailable("No enabled source is available for next-component search")
             return
         text = self.candidate_workspace.query_edit.text().strip() if query_text is None else query_text
         query = self._composition_query(text, spectrum.kind)
-        profile = self.project.profile_states.get(spectrum.id)
         gain = snapshot_gain(profile) if automatic else None
         if automatic and gain is None:
             self.candidate_workspace.set_failed("Stable Raman bands could not be evaluated for the accepted references")
@@ -292,6 +301,9 @@ class SpectroscopyAnalysisActionsMixin(ReferenceCardActionsMixin):
         self.candidate_workspace.set_residual_results(
             profile.residual_results if profile is not None else [], position_only=matching.position_only,
         )
+        if matching.position_only and not request.evidence_bands:
+            self.candidate_workspace.status_label.setText("No unexplained bands remain")
+            return
         result = outcome.result
         failures = getattr(result, "source_failures", {})
         scanned = getattr(result, "scanned_records", None)
@@ -312,6 +324,7 @@ class SpectroscopyAnalysisActionsMixin(ReferenceCardActionsMixin):
         spectrum = self.active_spectrum()
         profile = self.project.profile_states.get(spectrum.id) if spectrum is not None else None
         automatic = self._search_mode == "auto" and profile is not None and bool(profile.selected_results)
+        accepted = {item.candidate.key for item in profile.selected_results} if automatic else set()
         saved = profile.saved_gain if automatic else None
         ranked = bool(automatic and (profile.residual_results or (saved and saved.ranked)))
         if ranked:
@@ -322,7 +335,12 @@ class SpectroscopyAnalysisActionsMixin(ReferenceCardActionsMixin):
                 peak_priority=saved.priority if saved is not None else RamanPeakPriority.OFF,
                 refresh_scores=False,
             )
-            self.candidate_workspace.set_residual_results(profile.residual_results, position_only=True)
+            self.candidate_workspace.set_residual_results(
+                [item for item in profile.residual_results if item.candidate.key not in accepted],
+                position_only=True,
+            )
+            if not bands:
+                self.candidate_workspace.status_label.setText("No unexplained bands remain")
             return
         if saved is not None:
             self._set_candidate_gain_context(
@@ -331,15 +349,14 @@ class SpectroscopyAnalysisActionsMixin(ReferenceCardActionsMixin):
             )
         else:
             self._set_candidate_gain_context(profile, refresh_scores=False)
-        self.candidate_workspace.set_results(profile.results if profile is not None else [])
+        candidates = [item for item in profile.results if item.candidate.key not in accepted] if profile is not None else []
+        self.candidate_workspace.set_results(candidates)
         work = snapshot_gain(profile) if automatic and saved is None and prepare_gain else None
         if work is None:
             return
-        accepted = {item.candidate.key for item in profile.selected_results}
         refs = tuple(
             (item.candidate.key, tuple(band.position for band in item.reference_bands))
-            for item in profile.results
-            if item.candidate.key not in accepted and item.reference_bands
+            for item in candidates if item.reference_bands
         )
         request = GainTableRequest(work, refs)
         self._gain_table_request = request
@@ -437,9 +454,7 @@ class SpectroscopyAnalysisActionsMixin(ReferenceCardActionsMixin):
         self._cancel_card_preview()
         self._preview_result = None
         added = self.accepted_components_controller.add(spectrum_id, result)
-        if added and self._search_mode == "auto":
-            self._refresh_candidate_workspace()
-        elif added:
+        if added and self._search_mode != "auto":
             self._set_candidate_gain_context(self.project.profile_states.get(spectrum_id))
         if added:
             self._fit_phase_deconvolution()
@@ -447,6 +462,8 @@ class SpectroscopyAnalysisActionsMixin(ReferenceCardActionsMixin):
         self.right_tabs.setCurrentWidget(self.composition_panel)
         self._redraw_active_spectrum(preserve_view=True)
         self.statusBar().showMessage("Component accepted" if added else "Component already accepted", 3000)
+        if added and self._search_mode == "auto":
+            self.start_residual_search(automatic=True)
 
     def _refresh_accepted_components_workspace(self) -> None:
         spectrum = self.active_spectrum()
@@ -558,17 +575,23 @@ class SpectroscopyAnalysisActionsMixin(ReferenceCardActionsMixin):
         self._card_cache.clear()
         self._clear_candidate_preview()
 
-    def _start_source_operation(self, name: str, operation: str, package_key: str | None = None) -> None:
+    def _start_source_operation(
+        self, name: str, operation: str, package_key: str | None = None, *, local_archive: str | None = None,
+    ) -> None:
         self._analysis_sources_changed()
-        self.source_management_job_controller.start(name, operation, package_key)
+        self.source_management_job_controller.start(name, operation, package_key, local_archive=local_archive)
 
     def _source_operation_succeeded(self, name: str, operation: str, result: object) -> None:
         if operation == "build_index" and isinstance(result, tuple) and len(result) == 2:
             message = f"{name}: indexed {result[0]}, skipped {result[1]}"
-        elif operation == "update":
-            message = f"{name}: cache updated"
+        elif operation in {"update", "import_archive"}:
+            if isinstance(result, SourceUpdateResult) and result.index_counts is not None:
+                indexed, skipped = result.index_counts
+                message = f"{name}: ready locally ({indexed:,} indexed, {skipped:,} skipped)"
+            else:
+                message = f"{name}: cache updated"
         elif operation == "clear":
-            message = f"{name}: cache cleared"
+            message = f"{name}: local package deleted"
         else:
             message = f"{name}: line index cleared"
         self.source_settings_panel.set_operation_succeeded(name, operation, message)

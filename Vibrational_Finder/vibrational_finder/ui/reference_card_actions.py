@@ -176,7 +176,7 @@ class ReferenceCardActionsMixin:
             self.candidate_workspace.status_label.setText("Select a spectrum of the same method to overlay this reference")
             return False
         self._preview_result = result
-        self._redraw_active_spectrum(preserve_view=True)
+        self._redraw_candidate_preview()
         self.candidate_workspace.status_label.setText(f"Preview: {result.candidate.name or result.candidate.entry_id}")
         return True
 
@@ -204,7 +204,7 @@ class ReferenceCardActionsMixin:
         self._cancel_card_preview()
         if self._preview_result is not None:
             self._preview_result = None
-            self._redraw_active_spectrum(preserve_view=True)
+            self._redraw_candidate_preview()
 
     def _queue_card_accept(self, key: str) -> None:
         if self.active_spectrum() is None and any(

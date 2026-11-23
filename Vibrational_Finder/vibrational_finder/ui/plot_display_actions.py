@@ -10,6 +10,7 @@ from PySide6.QtGui import QActionGroup
 from PySide6.QtWidgets import QDialog, QInputDialog, QMenu, QVBoxLayout
 
 from vibrational_finder.core.models import SignalKind
+from vibrational_finder.metadata import DEFAULT_PLOT_TITLE
 from vibrational_finder.plot_export.metadata import CanvasLayer, tag_canvas_item
 from vibrational_finder.preprocessing import normalize_y
 from vibrational_finder.ui.plot_canvas_appearance import apply_spectrum_appearance
@@ -157,7 +158,7 @@ class PlotDisplayActionsMixin:
 
     def _set_candidate_profile_visible(self, visible: bool) -> None:
         self._show_candidate_profile = visible
-        self._redraw_active_spectrum(preserve_view=True)
+        self._redraw_candidate_preview()
 
     def _add_subtraction_layer_menu(self, menu: QMenu) -> None:
         primary = self.active_spectrum()
@@ -540,7 +541,7 @@ class PlotDisplayActionsMixin:
         relative = reference_comparison or self.plot_control_bar.normalize_checkbox.isChecked()
         apply_spectrum_appearance(
             self.spectrum_plot, settings,
-            title=spectrum.name if spectrum else "Raman Phase Finder: spectrum and candidate markers",
+            title=spectrum.name if spectrum else DEFAULT_PLOT_TITLE,
             x_label="Raman shift" if reference_comparison or (
                 spectrum is not None and spectrum.kind == SignalKind.RAMAN
             ) else "Wavenumber",

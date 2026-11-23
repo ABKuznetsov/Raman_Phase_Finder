@@ -1,23 +1,22 @@
 {
   "app_id": "ir_raman_phase_finder",
   "name": "Raman Phase Finder",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "channel": "stable",
-  "release_url": "https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/tag/v1.0.0",
+  "release_url": "https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/tag/v1.0.1",
   "assets": [
     {
-      "name": "Raman_Phase_Finder_macOS_1.0.0.pkg",
+      "name": "Raman_Phase_Finder_Setup_1.0.1.exe",
       "type": "installer",
-      "platform": "macos",
-      "url": "https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.0/Raman_Phase_Finder_macOS_1.0.0.pkg",
-      "sha256": "ff1d36846a7563b52f529488a10da0cdd00b223ebb8cd06e1d631c27b2abbe83",
-      "size_bytes": 5627743
+      "platform": "windows",
+      "url": "https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.1/Raman_Phase_Finder_Setup_1.0.1.exe",
+      "sha256": "26ce22c503ab07fa9690e05763528fa47d0283309a088a8bb6866241e43a98dc",
+      "size_bytes": 4256201
     }
   ],
   "summary": [
-    "Compare multiple reference cards on the main plot without loading a measured spectrum.",
-    "Save the reference comparison in an RPFF project and export selected cards as RREF or JSON.",
-    "Import or edit a shared reference card through Add reference.",
-    "The refreshed macOS installer keeps version 1.0.0. Download it manually if 1.0.0 is already installed."
+    "Keep line thickness and marker size proportional when exporting high-resolution JPG and PNG figures.",
+    "Use the Raman name and a 180 mm default width for figure exports.",
+    "Download, verify, and start future Windows updates from the confirmation dialog."
   ]
 }

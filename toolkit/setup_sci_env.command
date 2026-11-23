@@ -4,8 +4,8 @@ set -e
 APP_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SCI_ROOT="${IR_RAMAN_SCI_ROOT:-$HOME/Library/Application Support/Sci}"
 SCI_ENV="$SCI_ROOT/env"
-SCI_LOGS="$SCI_ROOT/logs"
-LOG_FILE="$SCI_LOGS/ir_raman_setup.log"
+SCI_LOGS="$SCI_ROOT/logs/Raman Phase Finder"
+LOG_FILE="$SCI_LOGS/setup.log"
 
 mkdir -p "$SCI_ROOT" "$SCI_LOGS"
 
@@ -18,7 +18,7 @@ run_python() {
     "${PYTHON_ARCH[@]}" "$@"
 }
 
-echo "[$(date)] Starting IR/Raman Sci setup" > "$LOG_FILE"
+echo "[$(date)] Starting Raman Sci setup" > "$LOG_FILE"
 echo "Application root: $APP_ROOT" >> "$LOG_FILE"
 echo "Sci root: $SCI_ROOT" >> "$LOG_FILE"
 
@@ -83,9 +83,9 @@ if [ ! -f "$APP_ROOT/pyproject.toml" ]; then
     exit 1
 fi
 
-echo "Installing Raman Phase Finder requirements..."
-echo "Installing Raman Phase Finder requirements..." >> "$LOG_FILE"
+echo "Installing Raman requirements..."
+echo "Installing Raman requirements..." >> "$LOG_FILE"
 run_python "$SCI_ENV/bin/python" -m pip install --disable-pip-version-check --timeout 60 --retries 3 --prefer-binary --upgrade "${APP_ROOT}[formats]" >> "$LOG_FILE" 2>&1
 
-echo "[$(date)] IR/Raman Sci setup complete." >> "$LOG_FILE"
+echo "[$(date)] Raman Sci setup complete." >> "$LOG_FILE"
 echo "Sci environment is ready."
