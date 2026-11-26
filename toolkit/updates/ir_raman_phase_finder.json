@@ -12,6 +12,14 @@
       "url": "https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.2/Raman_Phase_Finder_Setup_1.0.2.exe",
       "sha256": "f25f2568eff26153fbd927f89a8451580825f72467a6ac024c04d0b68b12971c",
       "size_bytes": 4276727
+    },
+    {
+      "name": "Raman_Phase_Finder_macOS_1.0.2.pkg",
+      "type": "installer",
+      "platform": "macos",
+      "url": "https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.2/Raman_Phase_Finder_macOS_1.0.2.pkg",
+      "sha256": "c0e54ee3d982135baf21df6948dd873abbdb03c5ef349c2ba9838c35d6e52693",
+      "size_bytes": 5654854
     }
   ],
   "summary": [

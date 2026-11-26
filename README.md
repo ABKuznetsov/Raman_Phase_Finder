@@ -9,7 +9,7 @@
 ## Download
 
 - [Windows installer (1.0.2): Raman_Phase_Finder_Setup_1.0.2.exe](https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.2/Raman_Phase_Finder_Setup_1.0.2.exe)
-- [macOS package (1.0.0): Raman_Phase_Finder_macOS_1.0.0.pkg](https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.0/Raman_Phase_Finder_macOS_1.0.0.pkg)
+- [macOS package (1.0.2): Raman_Phase_Finder_macOS_1.0.2.pkg](https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.2/Raman_Phase_Finder_macOS_1.0.2.pkg)
 - Linux: [run from source](#run-from-source) with Python 3.11 or 3.12.
 
 See [all releases and release notes](https://github.com/ABKuznetsov/Raman_Phase_Finder/releases).
