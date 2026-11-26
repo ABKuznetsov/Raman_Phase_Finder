@@ -15,11 +15,14 @@ class AcceptedComponentsWorkspace(QWidget):
     removeRequested = Signal(str)
     clearRequested = Signal()
     exportRequested = Signal(object, str)
+    measuredSubtractionRequested = Signal(str)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, allow_measured_subtraction: bool = False) -> None:
         super().__init__(parent)
         self.setObjectName("acceptedComponentsPanel")
         self._visible_keys: set[str] = set()
+        self._allow_measured_subtraction = allow_measured_subtraction
+        self._scored = True
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(3)
@@ -60,6 +63,7 @@ class AcceptedComponentsWorkspace(QWidget):
         *,
         scored: bool = True,
     ) -> None:
+        self._scored = scored
         self.title_label.setText("Accepted results" if scored else "Selected references")
         self._visible_keys = set(visible_keys)
         self.table.setRowCount(len(results))
@@ -95,6 +99,8 @@ class AcceptedComponentsWorkspace(QWidget):
             self._menu.addAction("Hide from plot" if visible else "Show on plot",
                                  lambda: self.visibilityChanged.emit(key, not visible))
             self._menu.addAction("Change color…", lambda: self.colorRequested.emit(key))
+            if self._allow_measured_subtraction and self._scored:
+                self._menu.addAction("Subtract measured phase…", lambda: self.measuredSubtractionRequested.emit(key))
             self._menu.addSeparator()
             self._menu.addAction("Export reference as RREF…",
                                  lambda: self.exportRequested.emit(keys, ".rref"))

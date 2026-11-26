@@ -100,8 +100,10 @@ class SpectrumProcessingController:
     def save_phase_residual(self, spectrum_id: str, operation: ProcessingOperation) -> ObservedSpectrum:
         preview = self.preview_phase_subtraction(spectrum_id, operation)
         current = self._current(spectrum_id)
+        phase_name = operation.parameters.get("phase_name")
+        reference_name = operation.parameters.get("reference_name") or phase_name or operation.parameters["phase_id"]
         identity = new_project_object_id("spectrum")
-        name = f"{current.name or current.id} − {operation.parameters['phase_name']}"
+        name = f"{current.name or current.id} − {phase_name or reference_name}"
         residual = replace(preview, id=identity, name=name, source_path="")
         # The residual's recipe starts at the exact processed input used in the fit.
         original = replace(deepcopy(current), id=identity, name=name, source_path="")
@@ -112,6 +114,16 @@ class SpectrumProcessingController:
         self.project.profile_states[identity] = SpectrumProfileState(
             spectrum=residual, processing=SpectrumProcessingState([operation], revision=1),
         )
+        self.project.sample_metadata[identity] = {
+            **{key: value for key, value in self.project.sample_metadata.get(spectrum_id, {}).items()
+               if "laser" in key.lower() or "excitation" in key.lower()},
+            "derivation": "measured phase subtraction" if phase_name else "measured spectrum subtraction",
+            "mixture_id": spectrum_id,
+            **({"phase_name": str(phase_name)} if phase_name else {}),
+            "phase_reference_id": str(operation.parameters["phase_id"]),
+            "phase_reference_name": str(reference_name),
+            "phase_scale": str(operation.parameters["factor"]),
+        }
         self.document.mark_changed()
         return residual
 

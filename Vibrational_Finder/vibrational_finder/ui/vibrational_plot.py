@@ -7,19 +7,22 @@ from math import ceil, log10
 
 import numpy as np
 import pyqtgraph as pg
-from PySide6.QtCore import QRectF, Qt, Signal
-from PySide6.QtGui import QFont, QPainterPath
-from PySide6.QtWidgets import QLayout, QVBoxLayout, QWidget
+from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtGui import QFont, QPainterPath, QPainterPathStroker
+from PySide6.QtWidgets import QGraphicsPathItem, QLayout, QVBoxLayout, QWidget
 
 from vibrational_finder.core.models import SignalKind
 from vibrational_finder.metadata import DEFAULT_PLOT_TITLE
+from vibrational_finder.phase_subtraction_work import PhaseFitResult
 from vibrational_finder.plot_export.metadata import CanvasLayer, canvas_item_tag, tag_canvas_item
 from vibrational_finder.models import ObservedSpectrum, VibrationalMatchResult
 from vibrational_finder.models import SpectralBand
 from vibrational_finder.layers.bands import matched_reference_band_positions, reference_peak_label
 from vibrational_finder.matching import MatchingOptions
-from vibrational_finder.services.phase_deconvolution import BackgroundTrace, FittedBand
-from vibrational_finder.ui.spectrum_legends import LegendSample
+from vibrational_finder.services.phase_deconvolution import (
+    BackgroundTrace, FittedBand, matched_reference_positions, phase_reference_input,
+)
+from vibrational_finder.ui.plot_trace_geometry import trace_scene_intervals, visible_plot_traces
 from vibrational_finder.units import spectral_x_to_nm
 
 
@@ -224,12 +227,52 @@ class SpectrumPlotCanvas(QWidget):
 
 
 _BAND_ANNOTATION_LAYERS = {CanvasLayer.MODE_LABELS, CanvasLayer.ASSIGNMENT_LABELS}
+_BAND_LABEL_GAP_PX = 16.0
+
+
+class _BandAnnotation(pg.TextItem):
+    def __init__(self, text, color, *, peak, row, reference_only):
+        super().__init__(text, color=color)
+        self.peak = QPointF(*peak)
+        self.row = row
+        self.reference_only = reference_only
+        self.textItem.document().setDocumentMargin(1)
+        height = self.textItem.boundingRect().height()
+        self.setAnchor((.5, 1. + row + _BAND_LABEL_GAP_PX / max(height, 1.)))
+        self.leader = QGraphicsPathItem(self)
+        ink = pg.mkColor(color)
+        ink.setAlpha(175)
+        self.leader.setPen(pg.mkPen(ink, width=.8, cosmetic=False))
+        self.leader.setZValue(-1)
+        self.leader.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+
+    def place(self, point: QPointF, box: QRectF, path: QPainterPath) -> None:
+        # The TextItem cancels its parent's scaling, so its child's units are scene pixels.
+        self.setAnchor(((point.x() - box.left()) / box.width(), (point.y() - box.top()) / box.height()))
+        self.leader.setPath(path.translated(-point.x(), -point.y()))
+
+
+def _band_leader_path(peak: QPointF, box: QRectF, *, bent: bool = False) -> QPainterPath:
+    left, right = box.left() + 2., box.right() - 2.
+    half = max(1., min(17., (right - left) / 2))
+    center = min(max(peak.x(), left + half), right - half)
+    start, end = center - half, center + half
+    shelf_y = box.bottom() + 2.5
+    join_x = min(max(peak.x(), start), end)
+    path = QPainterPath(peak)
+    if bent and peak.y() > shelf_y + 8. and abs(peak.x() - join_x) > 1.:
+        path.lineTo(join_x, peak.y() - 7.)
+    path.lineTo(join_x, shelf_y)
+    path.moveTo(start, shelf_y)
+    path.lineTo(end, shelf_y)
+    return path
 
 
 def _add_band_annotations(
     plot, band, x, y, color, owner_id, object_id, *,
-    mode=False, assignment=False, position=False, below=False, exportable=True,
-) -> tuple[LegendSample, ...]:
+    mode=False, assignment=False, position=False,
+    exportable=True, reference_only=False, leader_peak=None,
+) -> bool:
     labels = (
         (CanvasLayer.PEAK_LABELS, f"{band.position:.1f}" if position else ""),
         (CanvasLayer.MODE_LABELS, reference_peak_label(band) if mode else ""),
@@ -238,30 +281,16 @@ def _add_band_annotations(
     )
     labels = tuple((layer, text) for layer, text in labels if text)
     for row, (layer, text) in enumerate(labels):
-        anchor_y = -0.2 - row if below else 1.2 + row
-        label = pg.TextItem(text, color=color, anchor=(0.5, anchor_y))
-        label.textItem.document().setDocumentMargin(1)
-        label._band_annotation_anchor = anchor_y
+        label = _BandAnnotation(f"{text} (ref.)" if reference_only else text, color,
+                                peak=leader_peak if leader_peak is not None else (x, y),
+                                row=row, reference_only=reference_only)
+        if reference_only:
+            label.setToolTip(f"Reference only: {band.position:g} cm-1 before alignment. No visible matched band.")
         label.setPos(float(x), float(y))
         tag_canvas_item(label, layer=layer, owner_id=owner_id, object_id=f"{object_id}-{layer.value}",
                         exportable=exportable)
         plot.addItem(label, ignoreBounds=True)
-    kinds = {CanvasLayer.PEAK_LABELS: "position", CanvasLayer.MODE_LABELS: "mode",
-             CanvasLayer.ASSIGNMENT_LABELS: "assignment"}
-    return tuple(LegendSample(kinds[layer], text) for layer, text in labels)
-
-
-def _record_legend_samples(samples_by_phase, key, *entries: LegendSample) -> None:
-    if entries:
-        samples = samples_by_phase.setdefault(key, {})
-        for entry in entries:
-            samples.setdefault(entry.kind, entry)
-
-
-def _legend_samples(samples_by_phase) -> dict[str, tuple[LegendSample, ...]]:
-    order = ("line", "dash", "dot", "tick", "marker", "mode", "assignment", "position")
-    return {key: tuple(samples[kind] for kind in order if kind in samples)
-            for key, samples in samples_by_phase.items()}
+    return bool(labels)
 
 
 def layout_band_annotations(plot) -> None:
@@ -280,39 +309,65 @@ def layout_band_annotations(plot) -> None:
         if tag.layer == CanvasLayer.LEGEND and item.isVisible():
             item.updateTransform()
             occupied.append(item.sceneBoundingRect())
-        elif hasattr(item, "_band_annotation_anchor"):
-            labels.append((priorities[tag.layer], not tag.exportable, item))
-    for _, _, item in sorted(labels, key=lambda entry: (*entry[:2], entry[2].pos().x())):
+        elif isinstance(item, _BandAnnotation):
+            labels.append((priorities[tag.layer], not tag.exportable, item.reference_only, item))
+    if not labels:
+        return
+    traces = [samples for _, _, samples in visible_plot_traces(plot)]
+    stroker = QPainterPathStroker()
+    stroker.setWidth(2.)
+    for *_, item in sorted(labels, key=lambda entry: (*entry[:3], entry[3].pos().x())):
         point = view.mapViewToScene(item.pos())
-        anchor = item._band_annotation_anchor
+        peak = view.mapViewToScene(item.peak)
         width, height = item.textItem.boundingRect().size().toTuple()
         placed = False
-        if bounds.left() <= point.x() <= bounds.right() and bounds.top() <= point.y() <= bounds.bottom():
-            for row in range(4):
-                candidate = anchor + row * (1 if anchor > 0 else -1)
-                box = QRectF(point.x() - width / 2, point.y() - candidate * height, width, height)
-                if bounds.contains(box) and not any(previous.intersects(box) for previous in occupied):
-                    item.setAnchor((.5, candidate))
+        if (0 < width <= bounds.width() and height > 0
+                and bounds.left() <= point.x() <= bounds.right()
+                and bounds.top() - 2 * height <= point.y() <= bounds.bottom() + 2 * height):
+            step = min(32., max(16., width / 3))
+            lefts = tuple(dict.fromkeys(
+                min(max(point.x() - width / 2 + side * step, bounds.left()), bounds.right() - width)
+                for side in (0, -1, 1, -2, 2, -3, 3)
+            ))
+            intervals = {}
+            for row in range(12):
+                top = point.y() - _BAND_LABEL_GAP_PX - (item.row + 1 + row) * height
+                if top < bounds.top():
+                    break
+                for left in lefts:
+                    box = QRectF(left, top, width, height)
+                    if not bounds.contains(box) or any(previous.intersects(box) for previous in occupied):
+                        continue
+                    if left not in intervals:
+                        intervals[left] = trace_scene_intervals(view, traces, left, left + width)
+                    if any(lo - 3. < box.bottom() and hi + 3. > box.top() for lo, hi in intervals[left]):
+                        continue
+                    path = _band_leader_path(peak, box)
+                    direct = stroker.createStroke(path)
+                    if any(direct.intersects(previous) for previous in occupied):
+                        detour = _band_leader_path(peak, box, bent=True)
+                        detour_stroke = stroker.createStroke(detour)
+                        if not any(detour_stroke.intersects(previous) for previous in occupied):
+                            path = detour
+                    item.place(point, box, path)
                     occupied.append(box.adjusted(-2, -1, 2, 1))
                     placed = True
+                    break
+                if placed:
                     break
         if item.isVisible() != placed:
             item.setVisible(placed)
 
 
 def _measured_band_points(spectrum, bands, offset=0.0):
-    x, y = np.asarray(spectrum.x, dtype=float), np.asarray(spectrum.y, dtype=float)
-    finite = np.isfinite(x) & np.isfinite(y)
-    if not np.any(finite):
+    if not bands or (trace := _finite_sorted_trace(spectrum)) is None:
         return
-    x, y = x[finite], y[finite]
-    top = float(y.max())
-    span = float(np.ptp(y))
-    for i, band in enumerate(bands):
-        if not np.isfinite(band.position) or not x.min() <= band.position <= x.max():
-            continue
+    x, y = trace
+    in_range = [(i, band) for i, band in enumerate(bands) if x[0] <= band.position <= x[-1]]
+    positions = np.asarray([band.position for _, band in in_range])
+    for (i, band), top in zip(in_range, _nearby_trace_tops(x, y, positions), strict=True):
         level = float(y[np.argmin(abs(x - band.position))])
-        yield i, band, level + offset, span > 0 and level > top - span * .12
+        yield i, band, level + offset, float(top) + offset
 
 
 def show_subtraction_layers(
@@ -321,24 +376,31 @@ def show_subtraction_layers(
     background: BackgroundTrace | None = None,
     experiment: tuple[np.ndarray, np.ndarray] | None = None,
     residual_visible: bool = True,
-) -> dict[str, tuple[LegendSample, ...]]:
+    references: Mapping[str, Sequence[SpectralBand]] | None = None,
+) -> set[str]:
     """Plot optional fit components and the measured positions without modifying the spectrum."""
     x, y = np.asarray(spectrum.x), np.asarray(spectrum.y)
     finite = np.isfinite(x) & np.isfinite(y)
     if not np.any(finite):
-        return {}
+        return set()
     x, y = x[finite], y[finite]
     order = np.argsort(x)
     x, y = x[order], y[order]
     bottom = float(np.min(y)) + offset
-    span = float(np.ptp(y)) or 1.0
+    marker_bottom, marker_top = bottom, float(np.max(y)) + offset
     origin, scale = normalization
+    if experiment is not None:
+        experiment_y = (experiment[1] - origin) * scale + offset
+        marker_bottom = min(marker_bottom, float(experiment_y.min()))
+        marker_top = max(marker_top, float(experiment_y.max()))
     if background is not None:
         background_x, background_y = background
-        background_at_samples = np.interp(x, background_x, background_y)
+        background_at_samples = (np.interp(x, background_x, background_y) - origin) * scale + offset
         if settings.get("subtraction_background_visible", True):
+            marker_bottom = min(marker_bottom, float(background_at_samples.min()))
+            marker_top = max(marker_top, float(background_at_samples.max()))
             baseline_item = pg.PlotCurveItem(
-                x, (background_at_samples - origin) * scale + offset,
+                x, background_at_samples,
                 pen=pg.mkPen("#778392", width=1.3, style=Qt.PenStyle.DotLine),
             )
             tag_canvas_item(baseline_item, layer=CanvasLayer.PROCESSED, owner_id=spectrum.id,
@@ -346,11 +408,10 @@ def show_subtraction_layers(
             plot.addItem(baseline_item)
     phase_settings = settings.get("subtraction_phase_layers", {})
     marker_groups = {}
-    phase_rows = {}
+    phase_rows = {key: row for row, key in enumerate(phases)}
     profiles = {}
     labels = []
-    label_guides = {}
-    samples_by_phase = {}
+    drawn_phases = set()
     for i, band in enumerate(bands):
         if not x[0] <= band.position <= x[-1]:
             continue
@@ -358,14 +419,14 @@ def show_subtraction_layers(
         options = phase_settings.get(key, {})
         if not options.get("visible", True):
             continue
-        _name, color = phases.get(key, ("", "#515661"))
-        profile_visible = bool(key and options.get("profile", False))
-        gaussian_visible = bool(options.get("gaussians", False))
+        name, color = phases.get(key, ("", "#515661"))
         component_x, component_y = np.asarray(band.curve_x), np.asarray(band.curve_y)
+        has_contribution = bool(np.any(component_y))
+        profile_visible = bool(key and options.get("profile", False) and has_contribution)
+        gaussian_visible = bool(options.get("gaussians", False) and has_contribution)
         if profile_visible:
             values = profiles.setdefault(key, np.zeros(x.size))
             values += np.interp(x, component_x, component_y, left=0, right=0)
-            _record_legend_samples(samples_by_phase, key, LegendSample("line"))
         if gaussian_visible:
             in_range = (component_x >= x[0]) & (component_x <= x[-1])
             baseline = np.interp(component_x, background_x, background_y) if background is not None else band.baseline
@@ -377,21 +438,30 @@ def show_subtraction_layers(
             tag_canvas_item(curve, layer=CanvasLayer.REFERENCE_PROFILE, owner_id=spectrum.id,
                             object_id=f"subtraction-gaussian-{i}", exportable=exportable)
             plot.addItem(curve)
-            _record_legend_samples(samples_by_phase, key, LegendSample("dash"))
-        if band.removed:
-            row = phase_rows.setdefault(key, len(phase_rows))
-            height = bottom - (.035 + .035 * row) * span
-            markers_on = settings.get("subtraction_removed_markers", True)
-        else:
-            height = float(np.interp(band.position, x, y)) + offset
-            markers_on = settings.get("subtraction_remaining_markers", True)
-        markers_visible = markers_on and options.get("markers", True)
-        if markers_visible:
-            marker_groups.setdefault((key, band.removed), (color, [], []))
-            _, positions, heights = marker_groups[key, band.removed]
-            positions.append(band.position)
-            heights.append(height)
-            _record_legend_samples(samples_by_phase, key, LegendSample("tick" if band.removed else "marker"))
+            drawn_phases.add(key)
+            if in_range.any():
+                marker_bottom = min(marker_bottom, float(gaussian_height[in_range].min()))
+                marker_top = max(marker_top, float(gaussian_height[in_range].max()))
+        height = float(np.interp(band.position, x, y)) + offset
+        marker_setting = "subtraction_removed_markers" if band.removed else "subtraction_remaining_markers"
+        if settings.get(marker_setting, True) and options.get("markers", True):
+            kind = "tick" if band.removed else "marker"
+            group = marker_groups.setdefault((key, kind), (color, []))[1]
+            label = "Measured band" if band.removed else "Residual band"
+            tip = (f"{name}\n" if name else "") + f"{label}: {band.position:.1f} cm^-1"
+            if band.fwhm is not None:
+                tip += f"\nFitted FWHM: {band.fwhm:.2f} cm^-1"
+            if band.ambiguous:
+                tip += " (shared or ambiguous)"
+            nominal = band.reference_position
+            if band.removed and nominal is not None:
+                tip += f"\nReference: {nominal:.1f} cm^-1\nShift (measured - reference): {band.position - nominal:+.1f} cm^-1"
+                if not has_contribution:
+                    tip += "\nNo contribution subtracted."
+                group.extend(((nominal, None, "lower", tip), (band.position, None, "upper", tip)))
+            else:
+                group.append((band.position, None if band.removed else height, kind, tip))
+            drawn_phases.add(key)
         mode = bool(options.get("modes", False))
         assignment = bool(options.get("assignments", False))
         position = bool(options.get("positions", False) or (mode or assignment) and not (
@@ -402,7 +472,7 @@ def show_subtraction_layers(
         # A lower reference tick is not a peak. Anchor labels independently
         # to the local modeled lobe or to the corresponding visible trace.
         if (profile_visible or gaussian_visible) and component_x.size:
-            valid = np.flatnonzero((component_x >= x[0]) & (component_x <= x[-1]))
+            valid = np.flatnonzero((component_x >= x[0]) & (component_x <= x[-1]) & (component_y != 0))
             peak = valid[np.argmax(np.abs(component_y[valid]))] if valid.size else None
         else:
             peak = None
@@ -413,52 +483,78 @@ def show_subtraction_layers(
             labels.append((key, band.position, level, i, band, color, mode, assignment, position))
         elif gaussian_visible and peak is not None:
             labels.append((key, component_x[peak], gaussian_height[peak], i, band, color, mode, assignment, position))
-        elif not key and not band.removed and residual_visible:
-            labels.append((key, band.position, height, i, band, color, mode, assignment, position))
         else:
-            residual_y = float(np.interp(band.position, x, y)) + offset
-            start, tip = residual_y + .025 * span, residual_y + .08 * span
-            positions, heights = label_guides.setdefault(color, ([], []))
-            positions.extend((band.position, band.position))
-            heights.extend((start, tip))
-            _record_legend_samples(samples_by_phase, key, LegendSample("tick"))
-            labels.append((key, band.position, tip, i, band, color, mode, assignment, position))
+            labels.append((key, band.position, height, i, band, color, mode, assignment, position))
     for key, values in profiles.items():
         _name, color = phases[key]
         baseline = float(np.max(y)) + offset if np.min(values) < 0 else bottom
         if background is not None:
-            baseline = (background_at_samples - origin) * scale + offset
+            baseline = background_at_samples
+        contributing = values != 0
+        if not contributing.any():
+            continue
+        # Leave the common background visible between the fitted lobes.
         profiles[key] = baseline + values * scale
-        curve = pg.PlotCurveItem(x, profiles[key], pen=pg.mkPen(color, width=1.6))
+        profile_y = np.where(contributing, profiles[key], np.nan)
+        marker_bottom = min(marker_bottom, float(np.nanmin(profile_y)))
+        marker_top = max(marker_top, float(np.nanmax(profile_y)))
+        curve = pg.PlotCurveItem(x, profile_y, pen=pg.mkPen(color, width=1.6))
         tag_canvas_item(curve, layer=CanvasLayer.REFERENCE_PROFILE, owner_id=spectrum.id,
                         object_id=f"subtraction-profile-{key}", exportable=exportable)
         plot.addItem(curve)
+        drawn_phases.add(key)
     for key, label_x, level, i, band, color, mode, assignment, position in labels:
         if level is None:
             level = float(np.interp(label_x, x, profiles[key]))
-        annotations = _add_band_annotations(
+        leader_peak = (label_x, level)
+        positions = np.asarray([label_x])
+        if experiment is not None:
+            level = max(level, float(_nearby_trace_tops(experiment[0], experiment_y, positions)[0]))
+        if residual_visible:
+            level = max(level, float(_nearby_trace_tops(x, y, positions)[0]) + offset)
+        if _add_band_annotations(
             plot, SpectralBand(position=band.position, intensity=1, mode=band.mode, assignment=band.assignment),
             label_x, level, color, spectrum.id, f"subtraction-label-{i}",
-            mode=mode, assignment=assignment, position=position, exportable=exportable,
-        )
-        _record_legend_samples(samples_by_phase, key, *annotations)
-    tick = QPainterPath()
-    tick.moveTo(0, -.5)
-    tick.lineTo(0, .5)
-    for i, (color, (positions, heights)) in enumerate(label_guides.items()):
-        guide = pg.PlotCurveItem(positions, heights, connect="pairs", pen=pg.mkPen(color, width=1.35))
-        tag_canvas_item(guide, layer=CanvasLayer.REFERENCE_TICKS, owner_id=spectrum.id,
-                        object_id=f"subtraction-anchor-tick-{i}", exportable=exportable)
-        plot.addItem(guide)
-    for i, ((_key, removed), (color, positions, heights)) in enumerate(marker_groups.items()):
+            mode=mode, assignment=assignment, position=position, exportable=exportable, leader_peak=leader_peak,
+        ):
+            drawn_phases.add(key)
+    paired = matched_reference_positions(bands)
+    for key, reference_bands in (references or {}).items():
+        options = phase_settings.get(key, {})
+        if not options.get("visible", True) or not options.get("markers", True):
+            continue
+        positions = {band.position for band in reference_bands if x[0] <= band.position <= x[-1]}
+        unpaired = sorted(positions - paired.get(key, set()))
+        if unpaired:
+            name, color = phases[key]
+            marker_groups[key, "reference"] = (color, [
+                (p, None, "reference", f"{name}\nReference only: {p:.1f} cm^-1 (no unique match)")
+                for p in unpaired
+            ])
+            drawn_phases.add(key)
+
+    symbols = {"marker": "o", "reference": "d"}
+    for kind, start, stop in (("tick", -.5, .5), ("upper", -.5, 0), ("lower", 0, .5)):
+        path = QPainterPath()
+        path.moveTo(0, start)
+        path.lineTo(0, stop)
+        symbols[kind] = path
+    marker_span = marker_top - marker_bottom or 1.0
+    for i, ((key, kind), (color, points)) in enumerate(marker_groups.items()):
+        row_y = marker_bottom - (.035 + .05 * phase_rows.get(key, 0)) * marker_span
+        on_row = kind != "marker"
         markers = pg.ScatterPlotItem(
-            x=positions, y=heights, symbol=tick if removed else "o", size=9 if removed else 7,
-            pen=pg.mkPen(color, width=1.6), brush=None if removed else pg.mkBrush(color),
+            x=[p[0] for p in points], y=[row_y if p[1] is None else p[1] for p in points],
+            symbol=[symbols[p[2]] for p in points], data=[p[3] for p in points],
+            size=9 if kind == "tick" else 7, pen=pg.mkPen(color, width=1.6),
+            brush=None if on_row else pg.mkBrush(color),
+            hoverable=True, tip=lambda _x, _y, text: text,
         )
-        tag_canvas_item(markers, layer=CanvasLayer.REFERENCE_TICKS if removed else CanvasLayer.ASSIGNED_BANDS,
-                        owner_id=spectrum.id, object_id=f"subtraction-marker-{i}", exportable=exportable)
+        object_id = f"subtraction-reference-{key}" if kind == "reference" else f"subtraction-marker-{i}"
+        tag_canvas_item(markers, layer=CanvasLayer.REFERENCE_TICKS if on_row else CanvasLayer.ASSIGNED_BANDS,
+                        owner_id=spectrum.id, object_id=object_id, exportable=exportable)
         plot.addItem(markers)
-    return _legend_samples(samples_by_phase)
+    return drawn_phases
 
 
 def show_subtraction_experiment(plot, spectrum, fit, normalization, *, experiment_visible, residual_visible):
@@ -527,10 +623,10 @@ def show_observed_spectrum(
                          pen=pg.mkPen(trace_color, width=1.6))
         tag_canvas_item(item, layer=CanvasLayer.OBSERVED, owner_id=other.id, object_id=f"observed-{other.id}")
         if overlay_bands and (show_mode_labels or show_assignment_labels):
-            for row, band, height, below in _measured_band_points(other, overlay_bands.get(other.id, ()), offset):
-                _add_band_annotations(plot, band, band.position, height, overlay_color, other.id,
+            for row, band, marker_y, label_y in _measured_band_points(other, overlay_bands.get(other.id, ()), offset):
+                _add_band_annotations(plot, band, band.position, label_y, overlay_color, other.id,
                                       f"observed-band-label-{other.id}-{row}", mode=show_mode_labels,
-                                      assignment=show_assignment_labels, below=below)
+                                      assignment=show_assignment_labels, leader_peak=(band.position, marker_y))
     if background_y is not None and len(background_y) == len(spectrum.x):
         background = plot.plot(
             spectrum.x,
@@ -544,7 +640,7 @@ def show_observed_spectrum(
             object_id=f"background-preview-{spectrum.id}",
             exportable=False,
         )
-    for index, band, marker_y, below in _measured_band_points(spectrum, bands or ()):
+    for index, band, marker_y, label_y in _measured_band_points(spectrum, bands or ()):
         marker = pg.ScatterPlotItem(
             [band.position],
             [marker_y],
@@ -567,10 +663,10 @@ def show_observed_spectrum(
         )
         plot.addItem(marker)
         _add_band_annotations(
-            plot, band, band.position, marker_y, "#b71c1c", spectrum.id,
+            plot, band, band.position, label_y, "#b71c1c", spectrum.id,
             f"observed-band-label-{spectrum.id}-{index}", mode=show_mode_labels,
             assignment=show_assignment_labels, position=show_band_labels or index == selected_band_index,
-            below=below, exportable=not preview,
+            exportable=not preview, leader_peak=(band.position, marker_y),
         )
     plot.setTitle(spectrum.name, color="#111111", size="13pt")
     plot.setLabel("bottom", "Raman shift" if spectrum.kind.value == "raman" else "Wavenumber", units="cm-1")
@@ -607,7 +703,9 @@ def show_reference_layers(
     fit_markers: bool = False,
     observed_bands: Sequence[SpectralBand] = (),
     relative_reference_profiles: bool = False,
-) -> dict[str, tuple[LegendSample, ...]]:
+    phase_fit: PhaseFitResult | None = None,
+    normalized: bool = False,
+) -> set[str]:
     old_range = plot.viewRange() if preserve_view else None
     removable_layers = {
         CanvasLayer.REFERENCE_PROFILE, CanvasLayer.REFERENCE_BANDS, CanvasLayer.REFERENCE_TICKS,
@@ -622,7 +720,23 @@ def show_reference_layers(
             ):
                 plot.removeItem(item)
     measured = _finite_sorted_trace(observed)
-    samples_by_phase = {}
+    fit = phase_fit.fit if measured is not None and phase_fit is not None else None
+    profiles = phase_fit.profiles if fit is not None else None
+    fitted_positions = {}
+    if fit is not None:
+        for band in fit.bands:
+            if band.removed and not band.ambiguous and band.phase_key is not None and band.reference_position is not None:
+                fitted_positions.setdefault(band.phase_key, {})[band.reference_position] = band.position
+    origin, scale = (float(fit.measured.min()), 1 / (float(np.ptp(fit.measured)) or 1.0)) if (
+        normalized and fit is not None
+    ) else (0.0, 1.0)
+
+    def background_at(positions, fallback):
+        if fit is None:
+            return np.full_like(positions, fallback)
+        return (np.interp(positions, fit.x, fit.background) - origin) * scale + display_offset
+
+    drawn_phases = set()
     lane_index = 0
     for result in results:
         key = result.candidate.key
@@ -631,19 +745,37 @@ def show_reference_layers(
         color = colors.get(key, "#1a73e8")
         is_preview = key == preview_key
         visual_key = f"{observed.id}-{key}" if observed is not None else key
-        reference = result.aligned_reference or result.candidate.reference
+        bands, _ = phase_reference_input(result)
+        if not bands and phase_fit is not None:
+            bands = phase_fit.references.get(key, ())
+        shift = result.score.x_shift if np.isfinite(result.score.x_shift) else 0.0
         profile_visible = show_preview_profile if is_preview else show_profiles
-        if profile_visible and reference is not None and reference.x and reference.y:
-            y = np.asarray(_reference_display_y(reference.y, observed, profile=True), dtype=float)
-            if relative_reference_profiles and observed is None:
-                finite_y = y[np.isfinite(y)]
-                if finite_y.size:
-                    y = (y - finite_y.min()) / (float(np.ptp(finite_y)) or 1.0)
-            y = y + display_offset
+        reference = None
+        fitted_y = None
+        if profile_visible:
+            if observed is not None and not is_preview:
+                fitted_y = profiles.get(key) if profiles is not None else None
+            else:
+                candidate_traces = ((result.aligned_reference, result.candidate.reference) if is_preview
+                                    else (result.candidate.reference, result.aligned_reference))
+                reference = next((ref for ref in candidate_traces
+                                  if ref is not None and len(ref.x) == len(ref.y) and len(ref.x) >= 2), None)
+        if fitted_y is not None or reference is not None:
+            if fitted_y is not None:
+                x, y = fit.x, (fitted_y - origin) * scale
+            else:
+                x = reference.x
+                y = np.asarray(_reference_display_y(reference.y, observed, profile=True), dtype=float)
+                if relative_reference_profiles and observed is None:
+                    finite_y = y[np.isfinite(y)]
+                    if finite_y.size:
+                        y = (y - finite_y.min()) / (float(np.ptp(finite_y)) or 1.0)
             curve = pg.PlotCurveItem(
-                reference.x, y,
+                x, y + display_offset,
                 pen=pg.mkPen(color, width=1.4, style=Qt.PenStyle.DashLine if is_preview else Qt.PenStyle.SolidLine),
             )
+            if fitted_y is not None:
+                curve.setToolTip("Phase contribution fitted to uniquely supported measured bands, above the fitted background.")
             tag_canvas_item(
                 curve,
                 layer=CanvasLayer.REFERENCE_PROFILE,
@@ -652,19 +784,20 @@ def show_reference_layers(
                 exportable=not is_preview,
             )
             plot.addItem(curve, ignoreBounds=preserve_view)
-            _record_legend_samples(samples_by_phase, key, LegendSample("dash" if is_preview else "line"))
-        bands = result.reference_bands or (
-            list(result.candidate.band_set.bands) if result.candidate.band_set is not None else []
-        )
+            drawn_phases.add(key)
         if bands and (show_bands or show_peak_markers or show_reference_ticks
                       or show_mode_labels or show_assignment_labels):
             reference_positions = np.asarray([band.position for band in bands], dtype=float)
             nominal_preview = measured is None or (
                 is_preview and result.matched_peak_pairs is None and not result.observed_bands and not observed_bands
             )
-            positions = reference_positions + result.score.x_shift if nominal_preview else _matched_peak_x(
-                result, bands, observed_bands,
-            )
+            if nominal_preview:
+                positions = reference_positions + shift if is_preview else reference_positions
+            elif is_preview:
+                positions = _matched_peak_x(result, bands, observed_bands)
+            else:
+                paired = fitted_positions.get(key, {})
+                positions = np.asarray([paired.get(position, np.nan) for position in reference_positions])
             valid = np.isfinite(positions)
             if measured is not None:
                 grid, trace = measured
@@ -676,12 +809,9 @@ def show_reference_layers(
                 peak_y = np.interp(drawn_x, grid, trace)
                 heights = peak_y + display_offset
                 if show_bands:
-                    # Start just above the nearest comparison row, even when
-                    # that row is hidden. Browse previews have no comparison row.
-                    start = spectrum_base if is_preview else first_lane_top + span * .010
-                    bases = np.full_like(heights, start)
+                    bases = background_at(drawn_x, spectrum_base)
                 if show_mode_labels or show_assignment_labels:
-                    label_y = _nearby_trace_tops(grid, trace, drawn_x) + display_offset + span * .055
+                    label_y = _nearby_trace_tops(grid, trace, drawn_x) + display_offset
                 if show_reference_ticks and not is_preview:
                     top = first_lane_top - span * lane_index * .059
                     height = span * .037
@@ -700,8 +830,30 @@ def show_reference_layers(
                             f"reference-ticks-{visual_key}", layer=CanvasLayer.REFERENCE_TICKS,
                             ignore_bounds=not fit_markers,
                         )
-                        _record_legend_samples(samples_by_phase, key, LegendSample("tick"))
+                        drawn_phases.add(key)
                         lane_index += 1
+                if not is_preview:
+                    unmatched = ~valid & (reference_positions >= grid[0]) & (reference_positions <= grid[-1])
+                    if np.any(unmatched):
+                        nominal_x = reference_positions[unmatched]
+                        guide_base = background_at(nominal_x, spectrum_base)
+                        guide_tops = guide_base + span * .06
+                        if show_bands:
+                            _add_reference_lines(
+                                plot, np.repeat(nominal_x, 2), np.column_stack((guide_base, guide_tops)).ravel(),
+                                color, key, f"reference-only-bands-{visual_key}", ignore_bounds=not fit_markers,
+                                style=Qt.PenStyle.DashLine,
+                            )
+                            drawn_phases.add(key)
+                        if show_mode_labels or show_assignment_labels:
+                            anchors = np.maximum(guide_tops, _nearby_trace_tops(grid, trace, nominal_x) + display_offset)
+                            for index, x, y, tip in zip(np.flatnonzero(unmatched), nominal_x, anchors, guide_tops, strict=True):
+                                if _add_band_annotations(
+                                    plot, bands[index], x, y, color, key, f"reference-band-label-{visual_key}-{index}",
+                                    mode=show_mode_labels, assignment=show_assignment_labels, reference_only=True,
+                                    leader_peak=(x, tip),
+                                ):
+                                    drawn_phases.add(key)
             else:
                 intensities = np.asarray([band.intensity for band in bands], dtype=float)
                 valid &= np.isfinite(intensities)
@@ -719,7 +871,7 @@ def show_reference_layers(
                     plot, np.repeat(positions, 2), np.column_stack((bases, heights)).ravel(), color, key,
                     f"reference-bands-{visual_key}", exportable=not is_preview, ignore_bounds=not fit_markers,
                 )
-                _record_legend_samples(samples_by_phase, key, LegendSample("tick"))
+                drawn_phases.add(key)
             if show_peak_markers and (not nominal_preview or (measured is None and not is_preview)):
                 dots = pg.ScatterPlotItem(
                     positions, heights, symbol="o", size=8, brush=pg.mkBrush(color),
@@ -731,21 +883,28 @@ def show_reference_layers(
                     object_id=f"reference-markers-{visual_key}", exportable=not is_preview,
                 )
                 plot.addItem(dots, ignoreBounds=measured is not None or preserve_view)
-                _record_legend_samples(samples_by_phase, key, LegendSample("marker"))
+                drawn_phases.add(key)
             if (show_mode_labels or show_assignment_labels) and (not nominal_preview or measured is None):
-                for index, x, y in zip(np.flatnonzero(valid), positions, label_y, strict=True):
-                    annotations = _add_band_annotations(
+                for index, x, y, top in zip(np.flatnonzero(valid), positions, label_y, heights, strict=True):
+                    if _add_band_annotations(
                         plot, bands[index], x, y, color, key, f"reference-band-label-{visual_key}-{index}",
-                        mode=show_mode_labels, assignment=show_assignment_labels,
+                        mode=show_mode_labels, assignment=show_assignment_labels, leader_peak=(x, top),
                         exportable=not is_preview,
-                    )
-                    _record_legend_samples(samples_by_phase, key, *annotations)
-    residual = list(residual_bands or [])
-    if residual:
+                    ):
+                        drawn_phases.add(key)
+    if residual_bands and measured is not None:
+        grid, trace = measured
+        residual_x = np.asarray([band.position for band in residual_bands], dtype=float)
+        residual_x = residual_x[(residual_x >= grid[0]) & (residual_x <= grid[-1])]
+        if fit is not None and fitted_positions:
+            assigned = {position for paired in fitted_positions.values() for position in paired.values()}
+            residual_x = _unassigned_plot_positions(residual_x, fit.bands, assigned, grid)
+    else:
+        residual_x = np.empty(0)
+    if residual_x.size:
         owner = str(getattr(plot, "_vibrational_spectrum_id", None) or "residual")
         marker = pg.ScatterPlotItem(
-            [float(band.position) for band in residual],
-            [float(band.intensity) for band in residual],
+            residual_x, np.interp(residual_x, grid, trace) + display_offset,
             symbol="x",
             size=10,
             pen=pg.mkPen("#f57c00", width=1.5),
@@ -762,12 +921,28 @@ def show_reference_layers(
         plot.setRange(xRange=old_range[0], yRange=old_range[1], padding=0)
     elif visible_keys:
         plot.autoRange(padding=0.04)
-    return _legend_samples(samples_by_phase)
+    return drawn_phases
+
+
+def _unassigned_plot_positions(positions, measured_bands, assigned, grid):
+    # Search and fitting may detect the same peak at slightly different positions.
+    # Compare all fitted maxima, not only assigned ones and never the nominal card lines.
+    peaks = np.asarray([band.position for band in measured_bands], dtype=float)
+    tolerance = max(1.7, float(np.median(np.diff(grid)))) if grid.size > 1 else 1.7
+    keep = np.ones(positions.size, dtype=bool)
+    for index, position in enumerate(positions):
+        distances = np.abs(peaks - position)
+        closest = int(distances.argmin())
+        distance = distances[closest]
+        if (distance <= tolerance and peaks[closest] in assigned
+                and np.count_nonzero(np.isclose(distances, distance, rtol=0.0, atol=1e-9)) == 1):
+            keep[index] = False
+    return positions[keep]
 
 
 def _add_reference_lines(plot, x, y, color, owner, object_id, *, layer=CanvasLayer.REFERENCE_BANDS,
-                         exportable=True, ignore_bounds=False) -> None:
-    item = pg.PlotCurveItem(x, y, connect="pairs", pen=pg.mkPen(color, width=1.3))
+                         exportable=True, ignore_bounds=False, style=Qt.PenStyle.SolidLine) -> None:
+    item = pg.PlotCurveItem(x, y, connect="pairs", pen=pg.mkPen(color, width=1.3, style=style))
     tag_canvas_item(item, layer=layer, owner_id=owner, object_id=object_id, exportable=exportable)
     plot.addItem(item, ignoreBounds=ignore_bounds)
 

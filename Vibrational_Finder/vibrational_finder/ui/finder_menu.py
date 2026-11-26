@@ -49,6 +49,7 @@ def build_finder_menu_bar(owner) -> QMenuBar:
     menus["View"].addSeparator()
     owner._fullscreen_controller = FullscreenController(owner, menus["View"])
     command("Instrument", "Spectral settings", owner.top_toolbar.instrument_button.click)
+    command("Instrument", "Instrument profiles", owner.top_toolbar.instrument_profiles_button.click)
     command("Spectrum", "Processing", lambda: owner.right_tabs.setCurrentWidget(owner.action_bar))
     command("Bands", "Band search", owner.top_toolbar.bands_button.click)
     command("Search", "Identify compounds", owner.top_toolbar.match_button.click)

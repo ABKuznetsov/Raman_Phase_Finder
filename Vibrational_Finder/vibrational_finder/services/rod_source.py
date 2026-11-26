@@ -161,11 +161,18 @@ class RodSource:
         return self.reference_cache.search(query, sources=[self.name])
 
     def load_spectrum(self, candidate: CandidateRecord) -> ReferenceSpectrum:
-        member_name = self._member_by_record_key.get(candidate.key) or candidate.metadata.get("member", "")
-        if not member_name or not self.archive.is_cached:
+        if not self.archive.is_cached:
             raise FileNotFoundError(f"ROD spectrum is not indexed: {candidate.key}")
         with zipfile.ZipFile(self.archive.path) as archive:
-            text = archive.read(member_name).decode("utf-8", errors="replace")
+            reference = self._read_spectrum(archive, candidate)
+        reference.band_set = self.reference_cache.load_band_set(candidate.key, ROD_BAND_RECIPE_VERSION)
+        return reference
+
+    def _read_spectrum(self, archive: zipfile.ZipFile, candidate: CandidateRecord) -> ReferenceSpectrum:
+        member_name = self._member_by_record_key.get(candidate.key) or candidate.metadata.get("member", "")
+        if not member_name:
+            raise FileNotFoundError(f"ROD spectrum is not indexed: {candidate.key}")
+        text = archive.read(member_name).decode("utf-8", errors="replace")
         x, y = self._spectrum_xy(text)
         return ReferenceSpectrum(
             x=x,
@@ -174,13 +181,16 @@ class RodSource:
             name=candidate.name,
             source_path=f"{self.archive.path}:{member_name}",
             record=candidate,
-            band_set=self.reference_cache.load_band_set(candidate.key, ROD_BAND_RECIPE_VERSION),
         )
 
     def build_band_index(self) -> tuple[int, int]:
         from vibrational_finder.preprocessing import PreprocessingOptions, preprocess_spectrum
 
         indexed_keys = self.reference_cache.indexed_band_keys(self.name, ROD_BAND_RECIPE_VERSION)
+        checkpoint()
+        records = [record for record in self._records if record.key not in indexed_keys]
+        if not records:
+            return 0, 0
         indexed = 0
         skipped = 0
         pending: list[tuple[str, ReferenceBandSet]] = []
@@ -198,39 +208,42 @@ class RodSource:
             backend="auto",
             fit_peaks=False,
         )
-        for record in self._records:
-            checkpoint()
-            if record.key in indexed_keys:
-                continue
-            try:
-                reference = self.load_spectrum(record)
-                processed = preprocess_spectrum(reference, preprocessing_options)
-                band_set = extract_reference_band_set(
-                    processed,
-                    detection_options,
-                    origin=str(record.metadata.get("determination_method") or "experimental"),
-                )
-                band_set.processing_recipe.update(
-                    {
-                        "baseline_method": "arpls",
-                        "smoothing_method": "savgol",
-                        "smoothing_window": 7,
-                        "despike": True,
-                        "normalization": "max",
-                    }
-                )
-                if not band_set.bands:
+        try:
+            archive = zipfile.ZipFile(self.archive.path)
+        except (OSError, zipfile.BadZipFile):
+            return 0, len(records)
+        with archive:
+            for record in records:
+                checkpoint()
+                try:
+                    reference = self._read_spectrum(archive, record)
+                    processed = preprocess_spectrum(reference, preprocessing_options)
+                    band_set = extract_reference_band_set(
+                        processed,
+                        detection_options,
+                        origin=str(record.metadata.get("determination_method") or "experimental"),
+                    )
+                    band_set.processing_recipe.update(
+                        {
+                            "baseline_method": "arpls",
+                            "smoothing_method": "savgol",
+                            "smoothing_window": 7,
+                            "despike": True,
+                            "normalization": "max",
+                        }
+                    )
+                    if not band_set.bands:
+                        skipped += 1
+                        continue
+                    pending.append((record.key, band_set))
+                    if len(pending) >= 100:
+                        self.reference_cache.upsert_band_sets(pending, ROD_BAND_RECIPE_VERSION)
+                        pending.clear()
+                    indexed += 1
+                except JobCancelled:
+                    raise
+                except Exception:
                     skipped += 1
-                    continue
-                pending.append((record.key, band_set))
-                if len(pending) >= 100:
-                    self.reference_cache.upsert_band_sets(pending, ROD_BAND_RECIPE_VERSION)
-                    pending.clear()
-                indexed += 1
-            except JobCancelled:
-                raise
-            except Exception:
-                skipped += 1
         if pending:
             self.reference_cache.upsert_band_sets(pending, ROD_BAND_RECIPE_VERSION)
         return indexed, skipped

@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 import numpy as np
 from scipy.ndimage import median_filter
 from scipy.optimize import least_squares, nnls
-from scipy.signal import find_peaks, savgol_filter
+from scipy.signal import find_peaks, peak_prominences, savgol_filter
 
 from vibrational_finder.core.models import SignalKind
 from vibrational_finder.band_detection import BandDetectionOptions, detect_bands
@@ -15,6 +15,9 @@ from vibrational_finder.cancellation import checkpoint
 from vibrational_finder.models import ObservedSpectrum, ReferenceSpectrum, SpectralBand, VibrationalMatchResult
 from vibrational_finder.raman_gain import GainWindow
 from vibrational_finder.services.preprocessing_service import estimate_background
+
+
+PHASE_FIT_MODEL_VERSION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -44,6 +47,16 @@ class FittedBand:
     baseline: float
     curve_x: tuple[float, ...]
     curve_y: tuple[float, ...]
+    reference_position: float | None = None
+    fwhm: float | None = None
+
+
+def matched_reference_positions(bands: Sequence[FittedBand]) -> dict[str, set[float]]:
+    positions: dict[str, set[float]] = {}
+    for band in bands:
+        if band.phase_key is not None and band.reference_position is not None:
+            positions.setdefault(band.phase_key, set()).add(band.reference_position)
+    return positions
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +66,7 @@ class PhaseSubtractionFit:
     corrected: np.ndarray
     bands: tuple[FittedBand, ...]
     background: np.ndarray
+    model_version: int = PHASE_FIT_MODEL_VERSION
 
 
 PHASE_SUBTRACTION_METADATA = "phase_subtraction"
@@ -92,16 +106,16 @@ def _ordered_points(spectrum: ObservedSpectrum) -> tuple[np.ndarray, np.ndarray]
 
 
 def _fit_band_curves(x, excess, indices, widths, prominences):
-    """Fit independent peak widths jointly wherever their windows overlap."""
+    """Fit each peak's height, center, FWHM and pseudo-Voigt mixing independently."""
     centers = x[indices]
     step = float(np.median(np.diff(x)))
-    sigma = np.maximum(widths / (2 * np.sqrt(2 * np.log(2))), step / 2)
-    shift = np.minimum(np.maximum(sigma, step), 8.0)
+    widths = np.maximum(widths, step)
+    shift = np.minimum(np.maximum(widths / 2, step), 8.0)
     if len(centers) > 1:
         gap = np.diff(centers) * .4
         shift[:-1] = np.minimum(shift[:-1], gap)
         shift[1:] = np.minimum(shift[1:], gap)
-    radii = 6 * widths + shift
+    radii = 4 * widths + shift
     left = np.searchsorted(x, centers - radii)
     right = np.searchsorted(x, centers + radii, side="right")
     interval_order = np.argsort(left, kind="stable")
@@ -116,38 +130,62 @@ def _fit_band_curves(x, excess, indices, widths, prominences):
         group = interval_order[start:end]
         points = x[low:high]
         heights = np.maximum(prominences[group], 0.25 * excess[indices[group]])
-        initial = np.column_stack((heights, centers[group], sigma[group]))
-        lower = np.column_stack((np.zeros(end - start), centers[group] - shift[group], sigma[group] * .45))
+        initial = np.column_stack((heights, centers[group], widths[group], np.full(len(group), .25)))
+        lower = np.column_stack((np.zeros(len(group)), centers[group] - shift[group],
+                                 np.maximum(step / 2, widths[group] * .35), np.zeros(len(group))))
         upper = np.column_stack((np.maximum(excess[indices[group]], heights) * 2,
-                                 centers[group] + shift[group], sigma[group] * 3.5))
+                                 centers[group] + shift[group], widths[group] * 4, np.ones(len(group))))
+        local_x = (points - points.mean()) / (np.ptp(points) or 1.)
+        background_basis, _ = np.linalg.qr(np.column_stack((np.ones_like(local_x), local_x, local_x ** 2)))
+
+        def without_background(values):
+            # A smooth local correction to the baseline must not become a fitted peak.
+            return values - background_basis @ (background_basis.T @ values)
 
         def terms(parameters):
-            amplitude, center, spread = parameters.reshape(-1, 3).T
-            distance = (points[:, None] - center) / spread
-            shape = np.exp(-.5 * distance ** 2)
-            return distance, shape, shape * amplitude, spread
+            amplitude, center, fwhm, mix = parameters.reshape(-1, 4).T
+            distance = (points[:, None] - center) * 2 / fwhm
+            gaussian, lorentzian = _peak_shapes(distance)
+            return amplitude, fwhm, mix, distance, gaussian, lorentzian
 
         def residual(parameters):
             checkpoint()
-            return terms(parameters)[2].sum(axis=1) - excess[low:high]
+            amplitude, _fwhm, mix, _distance, gaussian, lorentzian = terms(parameters)
+            error = (_blend_peak(gaussian, lorentzian, mix) * amplitude).sum(axis=1) - excess[low:high]
+            return without_background(error)
 
         def jacobian(parameters):
-            distance, shape, model, spread = terms(parameters)
-            return np.stack((shape, model * distance / spread, model * distance ** 2 / spread), axis=-1).reshape(len(points), -1)
+            amplitude, fwhm, mix, distance, gaussian, lorentzian = terms(parameters)
+            slope = -2 * distance * amplitude * _blend_peak(np.log(2.) * gaussian, lorentzian ** 2, mix)
+            partials = np.stack((
+                _blend_peak(gaussian, lorentzian, mix), -2 * slope / fwhm,
+                -distance * slope / fwhm, amplitude * (lorentzian - gaussian),
+            ), axis=-1).reshape(len(points), -1)
+            return without_background(partials)
 
-        if len(points) >= initial.size:
+        if len(points) >= initial.size + background_basis.shape[1]:
             parameters = least_squares(residual, initial.ravel(), jac=jacobian,
                                        bounds=(lower.ravel(), upper.ravel()), max_nfev=70,
-                                       x_scale="jac").x.reshape(-1, 3)
+                                       x_scale="jac").x.reshape(-1, 4)
         else:
             parameters = initial
-        for index, (amplitude, center, spread) in zip(group, parameters, strict=True):
-            lo, hi = np.searchsorted(x, (center - 5 * spread, center + 5 * spread))
+        for index, (amplitude, center, fwhm, mix) in zip(group, parameters, strict=True):
+            lo, hi = np.searchsorted(x, (center - 8 * fwhm, center + 8 * fwhm))
             window = slice(lo, hi)
-            distance = abs(x[window] - center) / spread
-            taper = np.clip(5 - distance, 0, 1)
-            yield index, window, amplitude * np.exp(-.5 * distance ** 2) * taper
+            distance = (x[window] - center) * 2 / fwhm
+            taper = np.clip(8 - abs(distance) / 2, 0, 1)
+            curve = amplitude * _blend_peak(*_peak_shapes(distance), mix) * taper
+            yield index, window, curve, float(fwhm)
         start = end
+
+
+def _peak_shapes(distance):
+    squared = distance ** 2
+    return np.exp(-np.log(2.) * squared), 1 / (1 + squared)
+
+
+def _blend_peak(gaussian, lorentzian, mix):
+    return gaussian + mix * (lorentzian - gaussian)
 
 
 def phase_reference_input(
@@ -188,23 +226,114 @@ def _subtraction_signal(observed: ObservedSpectrum):
     return x, y, sign, background
 
 
-def _resolve_phase_bands(x, signal, phases):
-    prominence_floor = max(float(np.ptp(signal)) * 0.015, 4 * float(np.median(np.abs(np.diff(signal)))))
+def _reference_positions(phases, phase_offsets, matched=()):
+    offsets = phase_offsets or {}
+    return np.asarray([band.position + offsets.get(key, 0.) for key, bands in phases.items()
+                       for band in bands if np.isfinite(band.position) and (key, band.position) not in matched])
+
+
+def _peak_candidates(x, signal, prominence_floor):
     indices, props = find_peaks(signal, prominence=prominence_floor, width=1.5)
     samples = np.arange(x.size)
     widths = np.interp(props["right_ips"], samples, x) - np.interp(props["left_ips"], samples, x)
-    return indices, widths, props["prominences"], _assign_phase_bands(x, indices, widths, phases)
+    return indices, widths, props["prominences"]
 
 
-def _assign_phase_bands(x, indices, widths, phases):
+def _measured_prominence_floor(signal):
+    differences = np.diff(signal)
+    noise = 1.4826 / np.sqrt(2.) * np.median(np.abs(differences - np.median(differences)))
+    return max(5. * float(noise), .0015 * float(np.ptp(signal)), np.finfo(float).eps)
+
+
+def _resolve_phase_bands(x, signal, phases, phase_offsets=None, *, compare_unshifted=False):
+    floor = _measured_prominence_floor(signal)
+    indices, widths, prominences = _peak_candidates(x, signal, floor)
+    nominal = _reference_positions(phases, phase_offsets)
+    if compare_unshifted:
+        nominal = np.r_[nominal, _reference_positions(phases, None)]
+    near_reference = np.any(np.abs(x[indices, None] - nominal) <= 8., axis=1)
+    span = float(np.ptp(signal))
+    # Use local contrast for weak bands so slow baseline drift does not count as a peak.
+    step = float(np.median(np.diff(x)))
+    window = 2 * max(2, int(np.ceil(12. / step))) + 1
+    local_contrast = peak_prominences(signal, indices, wlen=window)[0]
+    weak = near_reference & (local_contrast >= max(floor, .003 * span))
+    measured = (prominences >= .015 * span) | (local_contrast >= max(1.4 * floor, .0075 * span))
+    keep = (weak | measured) & (signal[indices] >= floor)
+    return indices[keep], widths[keep], prominences[keep]
+
+
+def _validated_phase_offsets(x, indices, phases, proposed):
+    """A shift found in residual search is a hypothesis, not a fit constraint."""
     centers = x[indices]
-    claimed_by: list[dict[str, SpectralBand]] = [{} for _ in centers]
-    uncertain: set[int] = set()
+    if centers.size < 2:
+        return {}
+
+    def support(bands, offset):
+        references = np.asarray([band.position + offset for band in bands
+                                 if x[0] <= band.position + offset <= x[-1]])
+        if not references.size:
+            return 0, 0.
+        distances = np.abs(centers[:, None] - references)
+        errors = np.full(centers.size, 5.)
+        np.minimum.at(errors, distances.argmin(axis=0), distances.min(axis=0))
+        return np.count_nonzero(errors < 5.), float(np.sum(1 - (errors / 5.) ** 2))
+
+    offsets = {}
+    for key, shift in proposed.items():
+        checkpoint()
+        if key not in phases or not np.isfinite(shift) or not shift:
+            continue
+        base_count, base_quality = support(phases[key], 0.)
+        shifted_count, shifted_quality = support(phases[key], shift)
+        if shifted_count >= max(2, base_count) and shifted_quality > base_quality + .25:
+            offsets[key] = shift
+    return offsets
+
+
+def _add_supported_shoulders(x, signal, phases, phase_offsets, indices, widths, prominences, curves):
+    if not curves:
+        return None
+    existing = _assign_phase_bands(x, indices, widths, phases, phase_offsets)
+    matched = {(key, band.position) for key, band, _ in existing if band is not None}
+    nominal = _reference_positions(phases, phase_offsets, matched)
+    if not nominal.size:
+        return None
+    model = np.zeros_like(signal)
+    for _, window, curve, _ in curves:
+        model[window] += curve
+    floor = _measured_prominence_floor(signal)
+    residual = signal - model
+    extra, extra_widths, extra_prominences = _peak_candidates(x, residual, floor)
+    gap = max(1., 2. * float(np.median(np.diff(x))))
+    # Require a distinct, positive shoulder of an existing lobe at an unused card line.
+    keep = ((residual[extra] >= floor) & (model[extra] >= .12 * extra_prominences)
+            & np.any(np.abs(x[extra, None] - nominal) <= 5., axis=1)
+            & np.all(np.abs(x[extra, None] - x[indices]) >= gap, axis=1))
+    if not keep.any():
+        return None
+    new_indices = np.r_[indices, extra[keep]]
+    new_widths = np.r_[widths, extra_widths[keep]]
+    new_prominences = np.r_[prominences, extra_prominences[keep]]
+    assignments = _assign_phase_bands(x, new_indices, new_widths, phases, phase_offsets)
+    chosen = np.asarray([i < len(indices) or (band is not None and (key, band.position) not in matched)
+                         for i, (key, band, _) in enumerate(assignments)])
+    if not np.any(chosen[len(indices):]):
+        return None
+    order = np.flatnonzero(chosen)
+    order = order[np.argsort(new_indices[order])]
+    return new_indices[order], new_widths[order], new_prominences[order]
+
+
+def _assign_phase_bands(x, indices, widths, phases, phase_offsets=None):
+    centers = x[indices]
+    claimed_by: list[dict[str, tuple[float, SpectralBand, bool]]] = [{} for _ in centers]
     tolerances = np.maximum(8.0, widths / 2)
     for phase, bands in phases.items():
         checkpoint()
+        offset = phase_offsets.get(phase, 0.) if phase_offsets else 0.
         for band in bands:
-            position = band.position
+            position = band.position + offset
             if not np.isfinite(position) or not x[0] <= position <= x[-1]:
                 continue
             distances = np.abs(centers - position)
@@ -212,18 +341,24 @@ def _assign_phase_bands(x, indices, widths, phases):
             if not eligible.any():
                 continue
             nearest = np.flatnonzero(eligible & np.isclose(distances, distances[eligible].min()))
-            if len(nearest) == 1:
-                i = nearest[0]
+            for i in nearest:
+                distance, unique = float(distances[i]), nearest.size == 1
                 existing = claimed_by[i].get(phase)
-                if existing is None or distances[i] < abs(centers[i] - existing.position):
-                    claimed_by[i][phase] = band
-            else:
-                uncertain.update(nearest.tolist())
+                if existing is None or (distance, not unique) < (existing[0], not existing[2]):
+                    claimed_by[i][phase] = (distance, band, unique)
     assignments = []
-    for i, owners in enumerate(claimed_by):
-        ambiguous = i in uncertain or len(owners) > 1
-        key, band = next(iter(owners.items())) if len(owners) == 1 and not ambiguous else (None, None)
-        assignments.append((key, band, ambiguous))
+    step = float(np.median(np.diff(x)))
+    for width, owners in zip(widths, claimed_by, strict=True):
+        if not owners:
+            assignments.append((None, None, False))
+            continue
+        ranked = sorted(owners.items(), key=lambda item: item[1][0])
+        key, (distance, band, unique) = ranked[0]
+        # A worse match is not a veto; keep a shared band when the difference
+        # is too small relative to sampling and the measured width to resolve.
+        margin = max(1., 1.5 * step, .25 * width)
+        ambiguous = not unique or (len(ranked) > 1 and ranked[1][1][0] - distance <= margin)
+        assignments.append((None, None, True) if ambiguous else (key, band, False))
     return assignments
 
 
@@ -301,6 +436,8 @@ def fit_known_phase_subtraction(
     observed: ObservedSpectrum,
     phases: Mapping[str, Sequence[SpectralBand]],
     subtract: set[str],
+    *,
+    phase_offsets: Mapping[str, float] | None = None,
 ) -> PhaseSubtractionFit:
     """Model measured bands; subtract only uniquely assigned bands of selected phases."""
     if not subtract <= phases.keys():
@@ -308,26 +445,36 @@ def fit_known_phase_subtraction(
     x, y, sign, background = _subtraction_signal(observed)
     checkpoint()
     signal = sign * y - background
-    indices, widths, prominences, assignments = _resolve_phase_bands(x, signal, phases)
+    if phase_offsets:
+        evidence, _, _ = _resolve_phase_bands(x, signal, phases, phase_offsets, compare_unshifted=True)
+        phase_offsets = _validated_phase_offsets(x, evidence, phases, phase_offsets)
+    indices, widths, prominences = _resolve_phase_bands(x, signal, phases, phase_offsets)
+    curves = list(_fit_band_curves(x, signal, indices, widths, prominences))
+    shoulders = _add_supported_shoulders(x, signal, phases, phase_offsets, indices, widths, prominences, curves)
+    if shoulders is not None:
+        indices, widths, prominences = shoulders
+        curves = list(_fit_band_curves(x, signal, indices, widths, prominences))
+    assignments = _assign_phase_bands(x, indices, widths, phases, phase_offsets)
     total_removed, total_retained = np.zeros_like(y), np.zeros_like(y)
     modeled = []
-    curves = _fit_band_curves(x, signal, indices, widths, prominences)
-    for i, segment, component in curves:
+    for i, segment, component, fwhm in curves:
         key, band, ambiguous = assignments[i]
         removed = key in subtract
         (total_removed if removed else total_retained)[segment] += component
-        modeled.append((i, key, band, ambiguous, removed, segment, component))
+        modeled.append((i, key, band, ambiguous, removed, segment, component, fwhm))
     # Reserve the estimated contribution of retained bands as well as background.
     # Noise can already lie below the baseline; never push it any further down.
     removal = np.minimum(total_removed, np.maximum(signal - total_retained, 0.0))
     fraction = np.divide(removal, total_removed, out=np.zeros_like(removal), where=total_removed > 0)
     fitted = []
-    for i, key, band, ambiguous, removed, segment, component in sorted(modeled, key=lambda model: model[0]):
+    for i, key, band, ambiguous, removed, segment, component, fwhm in sorted(modeled, key=lambda model: model[0]):
         contribution = component * fraction[segment] if removed else component
         fitted.append(FittedBand(
             float(x[indices[i]]), key, (band.mode or band.symmetry or "") if band else "",
             (band.assignment or "") if band else "", ambiguous, removed, float(sign * background[indices[i]]),
             tuple(x[segment].tolist()), tuple((sign * contribution).tolist()),
+            reference_position=float(band.position) if band is not None else None,
+            fwhm=fwhm,
         ))
     return PhaseSubtractionFit(x, y, y - sign * removal, tuple(fitted), sign * background)
 

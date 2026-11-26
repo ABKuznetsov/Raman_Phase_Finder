@@ -495,6 +495,7 @@ def _encode_phase_fit(result: PhaseFitResult, assets: ProjectAssetWriter, key: s
         "references": {name: [_encode_band(band) for band in bands] for name, bands in result.references.items()},
     }
     if fit is not None:
+        data["model_version"] = fit.model_version
         x = fit.x.tolist()
         for name in ("measured", "corrected", "background"):
             trace = SignalTrace(x=x, y=getattr(fit, name).tolist(), kind=SignalKind.RAMAN)
@@ -536,7 +537,12 @@ def _decode_phase_fit(value: object, assets: ProjectAssetReader, path: str) -> P
     except (KeyError, TypeError, ValueError) as exc:
         raise ValueError(f"{path} contains invalid fitted bands.") from exc
     measured, corrected, background = (np.asarray(trace.y, dtype=float) for trace in traces)
-    return PhaseFitResult(references, PhaseSubtractionFit(np.asarray(x, dtype=float), measured, corrected, tuple(bands), background))
+    model_version = data.get("model_version", 1)
+    if type(model_version) is not int:
+        raise ValueError(f"{path}.model_version must be an integer.")
+    return PhaseFitResult(references, PhaseSubtractionFit(
+        np.asarray(x, dtype=float), measured, corrected, tuple(bands), background, model_version=model_version,
+    ))
 
 
 def _encode_saved_gain(gain: SavedGain) -> dict[str, object]:

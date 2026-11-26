@@ -8,7 +8,7 @@
 
 ## Download
 
-- [Windows installer (1.0.1): Raman_Phase_Finder_Setup_1.0.1.exe](https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.1/Raman_Phase_Finder_Setup_1.0.1.exe)
+- [Windows installer (1.0.2): Raman_Phase_Finder_Setup_1.0.2.exe](https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.2/Raman_Phase_Finder_Setup_1.0.2.exe)
 - [macOS package (1.0.0): Raman_Phase_Finder_macOS_1.0.0.pkg](https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.0/Raman_Phase_Finder_macOS_1.0.0.pkg)
 - Linux: [run from source](#run-from-source) with Python 3.11 or 3.12.
 
@@ -38,8 +38,10 @@ Turn on **Help** in the toolbar (**H**) and click a control to see what it does 
 - Import one or more Raman spectra and compare them individually or in vertically offset stacks.
 - Prepare spectra with smoothing, baseline subtraction, despiking, normalization, or Raman shift calibration.
 - Search reference libraries by spectrum or selected bands, and narrow results by chemical composition.
+- Save instrument profiles in the **Instrument** tab and give nearby laser wavelengths preference without changing Match or Gain values.
 - Compare **Match**, **Gain**, and unassigned bands as phases are accepted.
-- Control reference profiles, peak lines, lower shift ticks, and mode labels independently.
+- Fit overlapping Raman bands for multiple phases, with independent peak widths and intensities. Unresolved overlaps stay in the residual.
+- Control reference profiles, peak lines, lower shift ticks, and mode labels independently. Leader lines connect labels to their peaks, including in SVG export.
 - Create searchable reference cards from published band tables without a full measured profile.
 - Save portable `.rpff` projects and export figures as PNG, JPG, layered SVG, or PDF.
 
@@ -70,9 +72,10 @@ Use **Manage databases** to download or index external libraries and choose whic
 | [Raman Open Database (ROD)](https://solsa.crystallography.net/rod/) | A public collection of experimental and calculated Raman spectra. |
 | [OpenSpecy](https://www.openspecy.org/) | Raman libraries that include polymers and other materials. |
 | [Oulu CRD](https://archive.materialscloud.org/records/0m9r0-g3486) | Computational Raman spectra. |
+| [WURM](https://www.wurm.info/index.php?id=2) | Calculated mineral Raman modes, symmetries and relative powder activities. Fetched from the official catalogue; unchanged records are reused on update. [CC BY-NC-SA 3.0](https://www.wurm.info/index.php?id=6). |
 | User library | Your measurements and band lists from publications. |
 
-Third-party databases are not bundled. Follow each provider's terms and citation guidance. Downloaded and indexed libraries can be searched without an internet connection. Set `IR_RAMAN_OFFLINE=1` to skip release checks.
+Third-party databases are loaded separately from the application code. WURM is downloaded and updated directly from its official site. It provides per-record XML, not a bulk archive; Finder downloads compressed records concurrently and only rebuilds the index when needed. Follow each provider's terms and citation guidance. Downloaded and indexed libraries can be searched without an internet connection. Set `IR_RAMAN_OFFLINE=1` to skip release checks.
 
 ## Install and run
 
@@ -82,11 +85,11 @@ Run the Windows 10/11 (64-bit) installer with administrator approval. It install
 
 The program reuses the per-user Python environment at `%LocalAppData%\Sci\env`. Downloaded databases, user cards and settings are stored under `%LocalAppData%\Sci\apps\Raman Phase Finder`, outside the installation folder.
 
-The app checks for updates after opening. You can also check from **Help → Check for updates**. Starting with 1.0.1, **Download and install** downloads the Windows installer with progress, verifies its SHA-256 checksum, and launches it. **Install 1.0.1 manually when upgrading from 1.0.0**, which can only open the release page.
+The app checks for updates after opening. You can also check from **Help → Check for updates**. Starting with 1.0.1, **Download and install** downloads the Windows installer with progress, verifies its SHA-256 checksum, and launches it. When upgrading from 1.0.0, download and run the Windows installer above manually.
 
 ### macOS
 
-Open the 1.0.0 package and follow the installer, then launch **Raman Phase Finder** from Applications. The launcher creates or reuses a per-user Sci environment on first run. The 1.0.1 binary release is for Windows.
+Open the 1.0.0 package and follow the installer, then launch **Raman Phase Finder** from Applications. The launcher creates or reuses a per-user Sci environment on first run. The 1.0.2 installer is for Windows.
 
 ### Run from source
 

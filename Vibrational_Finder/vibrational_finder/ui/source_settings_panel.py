@@ -46,6 +46,7 @@ if TYPE_CHECKING:
 
 _REMOTE_LIBRARIES_SETTING = "sources/remote_catalogs_v1"
 _REST_LIBRARIES_SETTING = "sources/rest_catalogs_v1"
+_ENABLED_SOURCES_SETTING = "sources/enabled_v1"
 
 _SOURCE_DESCRIPTIONS = {
     USER_LIBRARY_NAME: "Your measured and literature references, stored in one local JSON library.",
@@ -53,6 +54,7 @@ _SOURCE_DESCRIPTIONS = {
     "ROD": "Measured mineral Raman reference spectra.",
     "OpenSpecy": "Raman references for polymers and related materials.",
     "Oulu CRD": "Calculated Raman spectra of crystalline materials.",
+    "WURM": "Calculated Raman modes and symmetries of crystalline minerals (CC BY-NC-SA 3.0).",
     "MLROD": "Measured mineral Raman spectra for identification and comparison.",
     "RamanBench": "Raman reference collections from multiple measurement domains.",
     ProjectReferenceSource.name: "References stored in the current project.",
@@ -154,11 +156,13 @@ class SourceActionCard(QFrame):
 
 class SourceSettingsPanel(QWidget):
     sourcesChanged = Signal()
+    sourceSelectionChanged = Signal()
     updateRequested = Signal(str, str)
     importArchiveRequested = Signal(str, str, str)
     clearCacheRequested = Signal(str, str)
     buildIndexRequested = Signal(str)
     clearIndexRequested = Signal(str)
+    cancelOperationRequested = Signal()
 
     def __init__(
         self, catalog: SpectroscopySourceCatalog, parent: QWidget | None = None, *,
@@ -250,11 +254,19 @@ class SourceSettingsPanel(QWidget):
         self.operation_status.setObjectName("sourceOperationStatus")
         self.operation_status.setTextFormat(Qt.TextFormat.PlainText)
         self.operation_status.setWordWrap(True)
-        layout.addWidget(self.operation_status)
+        self.cancel_operation_button = QPushButton("Cancel")
+        self.cancel_operation_button.setToolTip("Cancel the database operation")
+        self.cancel_operation_button.clicked.connect(self.cancelOperationRequested)
+        self.cancel_operation_button.hide()
+        operation_footer = QHBoxLayout()
+        operation_footer.addWidget(self.operation_status, 1)
+        operation_footer.addWidget(self.cancel_operation_button)
+        layout.addLayout(operation_footer)
 
         self.source_filter.currentIndexChanged.connect(lambda _index: self.refresh())
-        self.refresh_sources_button.clicked.connect(self.refresh)
+        self.refresh_sources_button.clicked.connect(lambda: self.refresh())
         self._restore_remote_libraries()
+        self._apply_enabled_preferences()
         if not defer_refresh:
             self.refresh()
 
@@ -271,7 +283,7 @@ class SourceSettingsPanel(QWidget):
         labels = {"raman": "Raman", "ftir": "FTIR", "unknown": "Unknown"}
         return ", ".join(labels.get(kind.value, kind.value) for kind in kinds)
 
-    def refresh(self) -> None:
+    def refresh(self, *, reload_sources: bool = True) -> None:
         selected_name = self.selected_source_name()
         selected_packages = {name: card.packages.currentData() for name, card in self.source_action_cards.items()}
         mode = self.source_filter.currentData()
@@ -281,8 +293,9 @@ class SourceSettingsPanel(QWidget):
                 self.catalog.descriptor(name).user_managed or name == ProjectReferenceSource.name
             )
         ]
-        for name in names:
-            self.catalog.refresh(name)
+        if reload_sources:
+            for name in names:
+                self.catalog.refresh(name)
         rows = self.catalog.status_rows(names)
         while self._search_options.count():
             widget = self._search_options.takeAt(0).widget()
@@ -354,7 +367,10 @@ class SourceSettingsPanel(QWidget):
     def set_catalog(self, catalog: SpectroscopySourceCatalog, *, refresh: bool = True) -> None:
         self.catalog = catalog
         self.manager = SpectroscopySourceManager(catalog)
-        if not refresh:
+        self._apply_enabled_preferences()
+        if not refresh and self.isVisible():
+            self.refresh(reload_sources=False)
+        elif not refresh:
             self._populated = False
         elif self._populated:
             self.refresh()
@@ -377,8 +393,9 @@ class SourceSettingsPanel(QWidget):
         return dialog
 
     def _user_library_changed(self) -> None:
+        self.catalog.refresh(USER_LIBRARY_NAME)
         self.sourcesChanged.emit()
-        self.refresh()
+        self.refresh(reload_sources=False)
 
     def selected_source_name(self) -> str | None:
         row = self.source_table.currentRow()
@@ -437,8 +454,12 @@ class SourceSettingsPanel(QWidget):
                 card.packages.currentIndexChanged.connect(update_package_actions)
                 update_package_actions()
             if name == "RRUFF":
-                card.add_option("import", "Import downloaded ZIP…", lambda: self._choose_rruff_archive(
+                card.add_option("import", "Import downloaded ZIP…", lambda: self._choose_database_archive(
                     name, str(card.packages.currentData() or ""),
+                ))
+            elif name == "WURM":
+                card.add_option("import", "Import WURM package…", lambda: self._choose_database_archive(
+                    name, "prepared",
                 ))
             if capabilities.can_build_index:
                 available = not descriptor.remote_url or any(package.cached for package in capabilities.packages)
@@ -482,9 +503,9 @@ class SourceSettingsPanel(QWidget):
         if self._confirm("Delete database package", f"Delete the local download and index for {target}?"):
             self.clearCacheRequested.emit(name, package_key)
 
-    def _choose_rruff_archive(self, name: str, package_key: str, filename: str = "") -> None:
+    def _choose_database_archive(self, name: str, package_key: str, filename: str = "") -> None:
         path, _filter = QFileDialog.getOpenFileName(
-            self, f"Select downloaded RRUFF ZIP ({filename})" if filename else "Select downloaded RRUFF ZIP",
+            self, f"Select {name} ZIP ({filename})" if filename else f"Select {name} ZIP",
             "", "ZIP archives (*.zip)",
         )
         if path:
@@ -512,7 +533,7 @@ class SourceSettingsPanel(QWidget):
         accepted = dialog.exec() == QDialog.DialogCode.Accepted
         dialog.deleteLater()
         if accepted:
-            self._choose_rruff_archive(name, archive.key, filename)
+            self._choose_database_archive(name, archive.key, filename)
 
     def _request_clear_index(self, name: str) -> None:
         if self._confirm("Clear line index", f"Delete the derived line index for {name}?"):
@@ -528,26 +549,59 @@ class SourceSettingsPanel(QWidget):
         }
         self._operation_running = True
         self.operation_status.setText(f"{labels.get(operation, operation)} {name}…")
+        self.cancel_operation_button.show()
         self._apply_operation_state()
+
+    def set_operation_progress(self, name: str, message: str) -> None:
+        if self._operation_running:
+            self.operation_status.setText(f"{name}: {message}")
 
     def set_operation_succeeded(self, name: str, operation: str, message: str = "") -> None:
         self._operation_running = False
+        self.cancel_operation_button.hide()
         self.refresh()
         self.operation_status.setText(message or f"{name}: {operation} complete")
 
     def set_operation_failed(self, name: str, operation: str, message: str) -> None:
         self._operation_running = False
+        self.cancel_operation_button.hide()
         self.operation_status.setText(f"{name}: {message}")
         self._apply_operation_state()
 
     def set_operation_cancelled(self, name: str, operation: str) -> None:
         self._operation_running = False
+        self.cancel_operation_button.hide()
         self.operation_status.setText(f"{name}: {operation} cancelled")
         self._apply_operation_state()
 
     def _set_search_source(self, name: str, enabled: bool) -> None:
+        if self.catalog.ui_state.enabled_sources[name] == enabled:
+            return
         self.catalog.set_enabled(name, enabled)
+        key = self.catalog.descriptor(name).preference_key
+        if self.settings is not None and key is not None:
+            preferences = self._saved_enabled_preferences()
+            preferences[key] = enabled
+            self.settings.setValue(_ENABLED_SOURCES_SETTING, json.dumps(preferences))
+            self.settings.sync()
+        self.sourceSelectionChanged.emit()
         self.sourcesChanged.emit()
+
+    def _saved_enabled_preferences(self) -> dict[str, bool]:
+        if self.settings is None:
+            return {}
+        try:
+            values = json.loads(self.settings.value(_ENABLED_SOURCES_SETTING, "{}", type=str))
+        except (TypeError, ValueError):
+            return {}
+        if not isinstance(values, dict):
+            return {}
+        return {key: enabled for key, enabled in values.items() if isinstance(enabled, bool)}
+
+    def _apply_enabled_preferences(self) -> None:
+        preferences = self._saved_enabled_preferences()
+        if preferences:
+            self.catalog.apply_enabled_preferences(preferences)
 
     def _choose_user_library(self) -> None:
         path, _filter = QFileDialog.getOpenFileName(self, "Add spectroscopy library", "", "CSV libraries (*.csv);;All files (*)")
@@ -626,6 +680,7 @@ class SourceSettingsPanel(QWidget):
 
     def _show_connected_library(self, name: str, message: str) -> None:
         self._save_remote_libraries()
+        self._apply_enabled_preferences()
         group = self.source_filter.findData("user")
         if self.source_filter.currentIndex() != group:
             self.source_filter.setCurrentIndex(group)

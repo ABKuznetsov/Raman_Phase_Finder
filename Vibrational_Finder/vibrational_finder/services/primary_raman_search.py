@@ -8,15 +8,17 @@ from math import isfinite
 import numpy as np
 
 from vibrational_finder.core.data_sources import SourceQuery
+from vibrational_finder.core.instrument_profile import InstrumentProfile
 from vibrational_finder.core.models import CandidateRecord, MatchScore, SignalKind, SignalTrace
 from vibrational_finder.band_detection import BandDetectionOptions, extract_reference_band_set
 from vibrational_finder.cancellation import JobCancelled, checkpoint
 from vibrational_finder.models import CompoundCandidate, ReferenceBandSet, ReferenceSpectrum, SpectralBand, VibrationalMatchResult
 from vibrational_finder.raman_gain import (
-    GainMatch, GainWindow, RamanPeakPriority, compare_gain_bands, gain_band_is_strong,
+    GainBandMatcher, GainMatch, GainWindow, RamanPeakPriority, gain_band_is_strong,
     priority_score, raman_priority_weights,
 )
 from vibrational_finder.services.staged_search import ReferenceSearchSource
+from vibrational_finder.services.search_progress import report_search_status
 
 
 @dataclass(slots=True)
@@ -31,12 +33,13 @@ class RamanIndexResult:
 @dataclass(slots=True)
 class _Hit:
     record: CandidateRecord
-    bands: ReferenceBandSet
+    bands: ReferenceBandSet | None
     match: GainMatch
     reference: ReferenceSpectrum | None = None
     for_gain: bool = False
     ranked_score: float | None = None
     dominant_weights: dict[int, float] = field(default_factory=dict)
+    laser_bonus: float = 0.0
 
     @property
     def score(self) -> float:
@@ -88,6 +91,7 @@ def rank_raman_index(
     candidate_gate: Callable[[CandidateRecord], bool] | None = None,
     for_gain: bool = False, gain_window: GainWindow | None = None, shift_step: float = 1.0,
     peak_priority: RamanPeakPriority = RamanPeakPriority.OFF,
+    instrument_profile: InstrumentProfile | None = None,
 ) -> RamanIndexResult:
     """Score all eligible local cards before capping Match or Gain results per source."""
     result = RamanIndexResult()
@@ -95,6 +99,10 @@ def rank_raman_index(
         return result
     window = gain_window if for_gain and gain_window is not None else GainWindow.from_coordinates(observed.x)
     coarse_step = shift_step if for_gain else 2.0
+    matcher = GainBandMatcher(observed_bands, window=window, max_shift=max_shift, shift_step=coarse_step,
+                              use_evidence_confidence=for_gain)
+    fine_matcher = (GainBandMatcher(observed_bands, window=window, max_shift=max_shift, shift_step=.5)
+                    if not for_gain and refine_profiles else None)
     seen: set[str] = set()
     detection = BandDetectionOptions(backend="scipy", min_prominence=0.04, min_width_cm1=2.0)
     limit = max(1, limit)
@@ -104,29 +112,34 @@ def rank_raman_index(
 
     for source in sources:
         checkpoint()
+        report_search_status(f"Searching {source.name}...")
         hits: list[tuple[float, int, _Hit]] = []
         scanned = unreadable = 0
         first_error = ""
+        recipe = getattr(source, "band_recipe_version", "")
+        cache = getattr(source, "reference_cache", None) if recipe else None
+        kinds = (SignalKind.RAMAN,) if getattr(source, "require_confirmed_raman", False) else (
+            SignalKind.RAMAN, SignalKind.UNKNOWN,
+        )
         try:
             # Only adapters with an authoritative native band index opt into direct
             # cache reads. User/project cards must use their current in-memory catalog.
-            recipe = getattr(source, "band_recipe_version", "")
-            cache = getattr(source, "reference_cache", None) if recipe else None
             records = cache.search(query, sources=[source.name], limit=-1) if cache is not None else source.search(query)
-            records = [r for r in records if r.kind in (SignalKind.RAMAN, SignalKind.UNKNOWN)
+            records = [r for r in records if r.kind in kinds
                        and query.allows_formula(r.formula) and (candidate_gate is None or candidate_gate(r))]
             for start in range(0, len(records), 400):
                 checkpoint()
                 batch = records[start:start + 400]
-                indexed = cache.load_band_sets([row.key for row in batch], recipe) if cache is not None else {}
+                indexed = cache.load_band_positions([row.key for row in batch], recipe) if cache is not None else {}
                 for record in batch:
                     checkpoint()
                     if record.key in seen:
                         continue
                     scanned += 1
-                    bands = indexed.get(record.key)
+                    positions = indexed.get(record.key)
+                    bands = None
                     reference = None
-                    if bands is None:
+                    if positions is None:
                         try:
                             reference = source.load_spectrum(record)
                             checkpoint()
@@ -140,19 +153,21 @@ def rank_raman_index(
                             unreadable += 1
                             first_error = first_error or f"{type(exc).__name__}: {exc}"
                             continue
+                        positions = [band.position for band in bands.bands] if bands is not None else []
                     seen.add(record.key)
-                    if bands is None or not bands.bands:
+                    if not positions:
                         continue
-                    match = compare_gain_bands(observed_bands, bands.bands, window=window,
-                                               max_shift=max_shift, shift_step=coarse_step, use_evidence_confidence=for_gain)
+                    match = matcher.compare_positions(positions)
                     if match.pairs:
                         hit = _Hit(record, bands, match, reference, for_gain=for_gain,
-                                   dominant_weights=dominant_weights)
-                        item = (hit.score, -scanned, hit)
+                                   dominant_weights=dominant_weights,
+                                   laser_bonus=instrument_profile.rank_bonus(record) if instrument_profile else 0.)
+                        item = (hit.score + hit.laser_bonus, -scanned, hit)
                         if len(hits) < pool_limit:
                             heappush(hits, item)
                         elif item[:2] > hits[0][:2]:
                             heapreplace(hits, item)
+                report_search_status(f"{source.name}: {scanned:,} / {len(records):,} cards checked")
         except JobCancelled:
             raise
         except Exception as exc:
@@ -168,18 +183,34 @@ def rank_raman_index(
         if weights:
             for _, _, hit in ordered:
                 hit.ranked_score = priority_score(hit.score, hit.match, weights)
-            ordered.sort(key=lambda item: item[2].ranked_score, reverse=True)
-        for _, _, hit in ordered[:limit]:
+            ordered.sort(key=lambda item: item[2].ranked_score + item[2].laser_bonus, reverse=True)
+        finalists = [hit for _, _, hit in ordered[:limit]]
+        indexed_bands = {}
+        if cache is not None:
+            try:
+                indexed_bands = cache.load_band_sets([hit.record.key for hit in finalists if hit.bands is None], recipe)
+            except JobCancelled:
+                raise
+            except Exception as exc:
+                result.failures.setdefault(source.name, f"{type(exc).__name__}: {exc}")
+        for hit in finalists:
             checkpoint()
+            if hit.bands is None:
+                hit.bands = indexed_bands.get(hit.record.key)
             if hit.reference is None:
                 try:
                     hit.reference = source.load_spectrum(hit.record)
+                except JobCancelled:
+                    raise
                 except Exception:
                     pass  # An indexed band-only match still exists without its profile.
+            if hit.bands is None:
+                hit.bands = hit.reference.band_set if hit.reference is not None else None
+                if hit.bands is None:
+                    continue
             checkpoint()
-            if not for_gain and refine_profiles and _profile_supports_alignment(hit):
-                refined = compare_gain_bands(observed_bands, hit.bands.bands, window=window,
-                                             max_shift=max_shift, shift_step=0.5)
+            if fine_matcher is not None and _profile_supports_alignment(hit):
+                refined = fine_matcher.compare_positions([band.position for band in hit.bands.bands])
                 if replace(hit, match=refined).score > hit.score:
                     hit.match = refined
                     if weights:
@@ -187,14 +218,18 @@ def rank_raman_index(
             result.records.append(hit.record)
             result.matches.append(_make_result(hit, observed_bands))
 
-    result.matches.sort(key=lambda row: row.score.combined, reverse=True)
     record_by_key = {row.key: row for row in result.records}
+    result.matches.sort(
+        key=lambda row: (instrument_profile.ranking_score(row.score.combined, record_by_key[row.candidate.key])
+                         if instrument_profile else row.score.combined),
+        reverse=True,
+    )
     result.records = [record_by_key[row.candidate.key] for row in result.matches]
     return result
 
 
 def _profile_supports_alignment(hit: _Hit) -> bool:
-    if hit.reference is None or len(hit.match.pairs) < 2:
+    if hit.reference is None or hit.bands is None or len(hit.match.pairs) < 2:
         return False
     x = np.asarray(hit.reference.x, dtype=float)
     y = np.asarray(hit.reference.y, dtype=float)
@@ -218,6 +253,7 @@ def _profile_supports_alignment(hit: _Hit) -> bool:
 
 
 def _make_result(hit: _Hit, observed: list[SpectralBand]) -> VibrationalMatchResult:
+    assert hit.bands is not None
     record, bands, match = hit.record, hit.bands.bands, hit.match
     reference = hit.reference
     if reference is not None and (not reference.x or not reference.y or len(reference.x) != len(reference.y)):

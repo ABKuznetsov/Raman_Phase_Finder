@@ -141,9 +141,11 @@ class PlotDisplayActionsMixin:
             action.setCheckable(True)
             action.setChecked(bool(settings.get(key, default)))
             if key == "layer_reference_mode_labels_visible":
-                action.setToolTip("Show the mode or symmetry above annotated Raman bands.")
+                action.setToolTip("Show documented modes or symmetries. Ref. labels are not matched bands.")
             elif key == "layer_reference_assignment_labels_visible":
                 action.setToolTip("Show the bond or vibration type above annotated Raman bands.")
+            elif key == "layer_phase_profiles_visible":
+                action.setToolTip("Show file profiles and dashed, display-only simulations for references with only peak lines.")
             action.toggled.connect(lambda visible, field=key: self._set_plot_layer_visible(field, visible))
         markers_only = menu.addAction("Markers only")
         markers_only.setToolTip("Show round phase markers without lines inside peaks or labels. Keep lower reference ticks as set.")
@@ -213,7 +215,7 @@ class PlotDisplayActionsMixin:
         if self._active_processing_key == "phase_deconvolution" and panel is not None:
             panel.sync_layers(layers)
         self.document.mark_changed()
-        refit_y = visible and field in {"gaussians", "profile"}
+        refit_y = visible and field in {"gaussians", "profile", "markers"}
         self._redraw_active_spectrum(preserve_view=not refit_y, preserve_x_range=refit_y)
 
     def _show_markers_only(self) -> None:

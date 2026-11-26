@@ -77,36 +77,43 @@ class ReferenceSpectrumCache:
             return int(connection.execute(sql, params).fetchone()[0])
 
     def upsert_band_set(self, reference_key: str, band_set: ReferenceBandSet, recipe_version: str) -> None:
-        with self._connect() as connection:
-            self._upsert_band_set(connection, reference_key, band_set, recipe_version)
+        self.upsert_band_sets([(reference_key, band_set)], recipe_version)
 
     def upsert_band_sets(
         self,
         items: list[tuple[str, ReferenceBandSet]],
         recipe_version: str,
     ) -> None:
+        if not items:
+            return
+        # Each key replaces the entire prior band set, including when the last set is empty.
+        replacements = dict(items)
         with self._connect() as connection:
-            for reference_key, band_set in items:
-                self._upsert_band_set(connection, reference_key, band_set, recipe_version)
+            connection.executemany(
+                "delete from reference_bands where reference_key = ?", ((key,) for key in replacements),
+            )
+            connection.executemany(
+                """
+                insert into reference_bands(
+                    reference_key, band_index, position, intensity, width, prominence,
+                    assignment, symmetry, confidence, origin, extraction_method,
+                    processing_json, recipe_version
+                ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                self._band_rows(replacements, recipe_version),
+            )
 
-    def _upsert_band_set(
-        self,
-        connection: sqlite3.Connection,
-        reference_key: str,
-        band_set: ReferenceBandSet,
+    @staticmethod
+    def _band_rows(
+        replacements: dict[str, ReferenceBandSet],
         recipe_version: str,
-    ) -> None:
-        connection.execute("delete from reference_bands where reference_key = ?", (reference_key,))
-        connection.executemany(
-            """
-            insert into reference_bands(
-                reference_key, band_index, position, intensity, width, prominence,
-                assignment, symmetry, confidence, origin, extraction_method,
-                processing_json, recipe_version
-            ) values(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
+    ) -> Iterator[tuple[object, ...]]:
+        for reference_key, band_set in replacements.items():
+            if not band_set.bands:
+                continue
+            processing_json = json.dumps(band_set.processing_recipe, ensure_ascii=True, sort_keys=True)
+            for index, band in enumerate(band_set.bands):
+                yield (
                     reference_key,
                     index,
                     float(band.position),
@@ -118,12 +125,9 @@ class ReferenceSpectrumCache:
                     float(band.confidence),
                     band_set.origin,
                     band_set.extraction_method,
-                    json.dumps(band_set.processing_recipe, ensure_ascii=True, sort_keys=True),
+                    processing_json,
                     recipe_version,
                 )
-                for index, band in enumerate(band_set.bands)
-            ],
-        )
 
     def load_band_set(self, reference_key: str, recipe_version: str = "") -> ReferenceBandSet | None:
         where = ["reference_key = ?"]
@@ -165,6 +169,22 @@ class ReferenceSpectrumCache:
             extraction_method=rows[0]["extraction_method"],
             processing_recipe=processing,
         )
+
+    def load_band_positions(self, reference_keys: list[str], recipe_version: str) -> dict[str, list[float]]:
+        if not reference_keys:
+            return {}
+        placeholders = ", ".join("?" for _ in reference_keys)
+        with self._connect() as connection:
+            rows = connection.execute(
+                f"select reference_key, position from reference_bands "
+                f"where reference_key in ({placeholders}) and recipe_version = ? "
+                f"order by reference_key, band_index",
+                (*reference_keys, recipe_version),
+            ).fetchall()
+        result: dict[str, list[float]] = {}
+        for key, position in rows:
+            result.setdefault(key, []).append(position)
+        return result
 
     def load_band_sets(self, reference_keys: list[str], recipe_version: str = "") -> dict[str, ReferenceBandSet]:
         keys = list(dict.fromkeys(key for key in reference_keys if key))

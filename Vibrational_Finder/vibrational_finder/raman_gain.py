@@ -123,103 +123,138 @@ def compare_gain_bands(
     use_evidence_confidence: bool = False,
 ) -> GainMatch:
     """Soft two-sided positional coverage with a bounded tolerance per observed band."""
-    # A Raman Gain mask lives in measured coordinates. A reference band can
-    # enter or leave it as the whole reference is translated.
-    shifted_window = use_evidence_confidence or bool(window.masked)
-    refs = [(i, band.position) for i, band in enumerate(reference)
-            if (isfinite(band.position) if shifted_window else window.includes(band.position))]
-    query = [(i, band) for i, band in enumerate(observed) if isfinite(band.position)]
-    nominal_ref_count = sum(window.includes(p) for _, p in refs) if shifted_window else len(refs)
-    best = GainMatch(0.0, 0.0, (), nominal_ref_count)
-    if not refs or not query:
+    return GainBandMatcher(
+        observed, window=window, max_shift=max_shift, shift_step=shift_step,
+        use_evidence_confidence=use_evidence_confidence,
+    ).compare_positions([band.position for band in reference])
+
+
+class GainBandMatcher:
+    """Prepare the measured bands once when comparing against a reference library."""
+
+    def __init__(
+        self, observed: Sequence[SpectralBand], *, window: GainWindow, max_shift: float, shift_step: float,
+        use_evidence_confidence: bool = False,
+    ) -> None:
+        query = [(i, band) for i, band in enumerate(observed) if isfinite(band.position)]
+        self.indices = [i for i, _ in query]
+        self.positions = np.asarray([band.position for _, band in query], dtype=float)
+        widths = np.asarray([band.width if isfinite(band.width) and band.width > 0 else 0. for _, band in query])
+        self.sigma = np.clip(.32 * widths, 1.7, 3.2)
+        weak = np.asarray([not gain_band_is_strong(band) for _, band in query], dtype=bool)
+        self.strong_target = min(3, len(query) - int(np.count_nonzero(weak))) if use_evidence_confidence else 0
+        self.weak = weak if use_evidence_confidence and weak.any() else None
+        self.weights = np.where(weak, _WEAK_WEIGHT, 1.) if self.weak is not None else None
+        self.observed_mass = float(self.weights.sum()) if self.weights is not None else len(query)
+        self.tolerances = 2.45 * self.sigma
+        if self.weak is not None:
+            self.tolerances[weak] = np.minimum(self.tolerances[weak], 3.)
+        self.central_range = ()
+        if use_evidence_confidence and len(query) >= 4:
+            # A stray band at either edge must not define the range.
+            span_limits = quantiles(self.positions.tolist(), n=10, method="inclusive")
+            if span_limits[-1] > span_limits[0]:
+                self.central_range = (span_limits[0], span_limits[-1])
+        steps = np.arange(max(.1, shift_step), max_shift + 1.e-9, max(.1, shift_step)) if len(query) >= 2 else []
+        self.shifts = np.asarray([0., *(s for step in steps for s in (-float(step), float(step)))])
+        self.penalties = np.exp(-.5 * (self.shifts / max(max_shift, .1)) ** 2)
+        self.window = window
+        self.shifted_window = use_evidence_confidence or bool(window.masked)
+
+    def _in_window(self, positions: np.ndarray) -> np.ndarray:
+        eligible = np.isfinite(positions)
+        if self.window.measured is not None:
+            low, high = self.window.measured
+            eligible &= (positions >= low) & (positions <= high)
+        for low, high in self.window.masked:
+            eligible &= (positions < low) | (positions > high)
+        return eligible
+
+    def compare_positions(self, reference: Sequence[float]) -> GainMatch:
+        values = np.asarray(reference, dtype=float)
+        nominal = self._in_window(values)
+        indices = np.flatnonzero(np.isfinite(values) if self.shifted_window else nominal)
+        positions = values[indices]
+        best = GainMatch(0., 0., (), int(nominal.sum()), self.strong_target if len(indices) else 0)
+        if not len(indices) or not self.indices:
+            return best
+
+        shifts = self.shifts if len(indices) >= 2 else self.shifts[:1]
+        differences = self.positions[:, None] - positions
+        # Exclude only pairs outside tolerance for every possible shift.
+        rows, columns = np.nonzero(np.abs(differences) <= (abs(shifts[-1]) + self.tolerances + 1.e-9)[:, None])
+        if not len(rows):
+            return best
+        deltas = np.abs(differences[rows, columns] - shifts[:, None])
+        scaled = deltas / self.sigma[rows]
+        allowed = scaled <= 2.45
+        if self.weak is not None:
+            allowed &= deltas <= self.tolerances[rows]
+        eligibility = None
+        if self.shifted_window and (self.window.measured is not None or self.window.masked):
+            eligibility = self._in_window(positions + shifts[:, None])
+            allowed &= eligibility[:, columns]
+
+        nonempty_shifts = np.flatnonzero(allowed.any(axis=1))
+        for shift_index in nonempty_shifts:
+            shift = float(shifts[shift_index])
+            edges = np.flatnonzero(allowed[shift_index])
+            if shift and len(edges) < 2:
+                continue
+            r, c = rows[edges], columns[edges]
+            strength = np.exp(-.5 * scaled[shift_index, edges] ** 2)
+            if self.weights is not None:
+                strength *= self.weights[r]
+            eligible_count = len(indices) if eligibility is None else int(eligibility[shift_index].sum())
+            delta = deltas[shift_index, edges]
+            if not _disjoint_pairs(r, c):
+                eligible_columns = None if eligibility is None else np.flatnonzero(eligibility[shift_index])
+                local_columns = c if eligible_columns is None else np.searchsorted(eligible_columns, c)
+                costs = np.zeros((len(self.indices), eligible_count))
+                costs[r, local_columns] = strength
+                r, c = linear_sum_assignment(-costs)
+                strength = costs[r, c]
+                positive = strength > 0.
+                r, c, strength = r[positive], c[positive], strength[positive]
+                if eligible_columns is not None:
+                    c = eligible_columns[c]
+                delta = np.abs(differences[r, c] - shift)
+
+            strong_pairs = len(r)
+            if self.weak is not None:
+                weak_count = int(np.count_nonzero(self.weak[r]))
+                if weak_count == 1:
+                    keep = ~self.weak[r]
+                    r, c, delta, strength = r[keep], c[keep], delta[keep], strength[keep]
+                    weak_count = 0
+                strong_pairs = len(r) - weak_count
+            weak_only = bool(len(r) and not strong_pairs)
+            if shift and len(r) < (3 if weak_only else 2):
+                continue
+            quality = float(200 * strength.sum() / (self.observed_mass + eligible_count) * self.penalties[shift_index])
+            if weak_only:
+                quality *= .625
+            if self.strong_target:
+                if strong_pairs == 1:
+                    quality *= .25
+                elif strong_pairs == 2 and self.strong_target == 3:
+                    quality *= .90
+            if self.central_range and len(r):
+                low, high = self.central_range
+                matched = self.positions[r]
+                covered = max(0., min(high, float(matched.max())) - max(low, float(matched.min())))
+                quality *= .5 + .5 * (covered / (high - low))
+            if quality > best.quality:
+                best = GainMatch(
+                    quality, shift,
+                    tuple((self.indices[i], int(indices[j]), float(d)) for i, j, d in zip(r, c, delta)),
+                    eligible_count, self.strong_target,
+                )
         return best
 
-    # Width is only a proxy for positional uncertainty, never an unlimited tolerance.
-    widths = np.array([band.width if isfinite(band.width) and band.width > 0 else 0.0 for _, band in query])
-    sigma = np.clip(.32 * widths, 1.7, 3.2)
-    weak = np.array([not gain_band_is_strong(band) for _, band in query]) if use_evidence_confidence else None
-    weighted = weak is not None and bool(weak.any())
-    strong_target = min(3, len(query) - int(np.count_nonzero(weak))) if weak is not None else 0
-    if strong_target:
-        best = GainMatch(0.0, 0.0, (), nominal_ref_count, strong_target)
-    if weighted:
-        weights = np.where(weak, _WEAK_WEIGHT, 1.)
-        tolerances = np.where(weak, np.minimum(2.45 * sigma, 3.0), 2.45 * sigma)
-        observed_mass = float(weights.sum())
-    else:
-        observed_mass = len(query)
-    positions = np.array([band.position for _, band in query])
-    central_range = ()
-    if use_evidence_confidence and len(query) >= 4:
-        # Use the middle 80% so a stray band at either edge doesn't define the range.
-        span_limits = quantiles(positions.tolist(), n=10, method="inclusive")
-        if span_limits[-1] > span_limits[0]:
-            central_range = (span_limits[0], span_limits[-1])
-    ref_positions = np.array([p for _, p in refs])
-    differences = positions[:, None] - ref_positions[None, :]
-    steps = np.arange(max(.1, shift_step), max_shift + 1.e-9, max(.1, shift_step)) if min(len(query), len(refs)) >= 2 else []
-    shifts = (0.0, *(s for step in steps for s in (-float(step), float(step))))
-    eligible_by_shift = None
-    if shifted_window and (window.measured is not None or window.masked):
-        aligned = ref_positions[None, :] + np.asarray(shifts)[:, None]
-        eligible_by_shift = np.ones(aligned.shape, dtype=bool)
-        if window.measured is not None:
-            low, high = window.measured
-            eligible_by_shift &= (aligned >= low) & (aligned <= high)
-        for low, high in window.masked:
-            eligible_by_shift &= (aligned < low) | (aligned > high)
-    all_columns = np.arange(len(refs))
-    for shift_index, shift in enumerate(shifts):
-        eligible_columns = all_columns if eligible_by_shift is None else np.flatnonzero(eligible_by_shift[shift_index])
-        eligible_count = len(eligible_columns)
-        if eligible_count < (2 if shift else 1):
-            continue
-        eligible_differences = differences if eligible_count == len(refs) else differences[:, eligible_columns]
-        delta = np.abs(eligible_differences - shift)
-        scaled = delta / sigma[:, None]
-        strength = np.where(scaled <= 2.45, np.exp(-.5 * scaled ** 2), 0.)
-        if weighted:
-            strength = np.where(delta <= tolerances[:, None], strength * weights[:, None], 0.)
-        rows, columns = linear_sum_assignment(-strength)
-        positive = strength[rows, columns] > 0
-        rows, columns = rows[positive], columns[positive]
-        weak_only = False
-        strong_pairs = len(rows)
-        if weighted:
-            weak_pairs = weak[rows]
-            if np.count_nonzero(weak_pairs) < 2:
-                rows, columns = rows[~weak_pairs], columns[~weak_pairs]
-                weak_pairs = weak[rows]
-            strong_pairs = len(rows) - int(np.count_nonzero(weak_pairs))
-            weak_only = bool(len(rows) and not strong_pairs)
-            if shift and weak_only and len(rows) < 3:
-                continue  # Don't learn an offset from two marginal peaks alone.
-        if shift and len(rows) < 2:
-            continue
-        shift_penalty = np.exp(-.5 * (shift / max(max_shift, .1)) ** 2)
-        quality = float(200 * strength[rows, columns].sum() / (observed_mass + eligible_count) * shift_penalty)
-        if weak_only:
-            # Even exact weak-only coverage (40/100 before this factor) is tentative.
-            quality *= .625
-        if strong_target:
-            if strong_pairs == 1:
-                # Sparse references can have perfect coverage from a single peak;
-                # weak supporting bands cannot turn it into a strong identification.
-                quality *= .25
-            elif strong_pairs == 2 and strong_target == 3:
-                quality *= .90  # Prefer a third strong match, without discarding two-band candidates.
-        if central_range and len(rows):
-            low, high = central_range
-            matched_positions = positions[rows]
-            covered_span = max(0., min(high, float(matched_positions.max())) - max(low, float(matched_positions.min())))
-            # Keep a local or single-band match visible, but prefer support across
-            # the residual fingerprint when there is more of it to explain.
-            quality *= .5 + .5 * (covered_span / (high - low))
-        if quality > best.quality:
-            best = GainMatch(
-                quality, shift,
-                tuple((query[i][0], refs[eligible_columns[j]][0], float(delta[i, j])) for i, j in zip(rows, columns)),
-                eligible_count,
-                strong_target,
-            )
-    return best
+
+def _disjoint_pairs(rows: np.ndarray, columns: np.ndarray) -> bool:
+    # np.nonzero returns row-major order. When no positive edges compete,
+    # all of them are optimal without running the assignment solver.
+    return (len(rows) < 2 or
+            (not (rows[1:] == rows[:-1]).any() and len(set(columns.tolist())) == len(columns)))

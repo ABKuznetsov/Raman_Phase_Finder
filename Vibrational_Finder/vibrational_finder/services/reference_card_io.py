@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from math import isfinite
 from pathlib import Path, PureWindowsPath
 from tempfile import NamedTemporaryFile
+from typing import cast
 from zipfile import BadZipFile, ZIP_DEFLATED, ZipFile
 
 from vibrational_finder.core.models import SignalKind
@@ -207,6 +208,10 @@ def _shareable(value: object) -> object:
     return value
 
 
+def portable_reference_card(payload: dict) -> dict:
+    return cast(dict, _shareable(validate_reference_card(payload)))
+
+
 def _read_rref(path: Path) -> dict:
     try:
         with ZipFile(path) as archive:
@@ -268,7 +273,7 @@ def write_reference_card(path: str | Path, payload: dict) -> Path:
     target = Path(path)
     if not target.suffix:
         target = target.with_suffix(".rref")
-    card = _shareable(validate_reference_card(payload))
+    card = portable_reference_card(payload)
     if target.suffix.lower() in {".json", ".vsref"}:
         write_json_atomic(target, card)
         return target

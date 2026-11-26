@@ -71,6 +71,8 @@ def build_phase_subtraction_operation(
     *,
     factor: float | None = None,
     fit_range: tuple[float, float] | None = None,
+    fit_windows: tuple[tuple[float, float], ...] | None = None,
+    conservative_scale: bool = False,
 ) -> ProcessingOperation:
     if spectrum.id == reference.id:
         raise ValueError("Select a different spectrum as the phase reference.")
@@ -91,21 +93,37 @@ def build_phase_subtraction_operation(
     }
     if factor is None:
         fit_x = x[overlap]
-        lower, upper = sorted(fit_range) if fit_range is not None else (float(fit_x.min()), float(fit_x.max()))
-        if not np.isfinite(lower) or not np.isfinite(upper):
-            raise ValueError("The fit range must be finite.")
-        fit = (fit_x >= lower) & (fit_x <= upper)
-        if np.count_nonzero(fit) < 2:
-            raise ValueError("Select a fit range with at least two overlapping points.")
-        phase, observed = aligned[fit], y[overlap][fit]
-        # A free constant in the fit keeps an intensity offset from biasing the scale.
-        # It is not subtracted from the measured spectrum.
-        centered = phase - phase.mean()
-        norm = float(np.dot(centered, centered))
-        if norm <= 0:
+        if fit_range is not None and fit_windows is not None:
+            raise ValueError("Choose either a manual range or automatic fit windows.")
+        windows = fit_windows if fit_windows is not None else (
+            fit_range or (float(fit_x.min()), float(fit_x.max())),
+        )
+        observed = y[overlap]
+        scales, fitted = [], []
+        for interval in windows:
+            lower, upper = sorted(interval)
+            if not np.isfinite(lower) or not np.isfinite(upper):
+                raise ValueError("The fit range must be finite.")
+            fit = (fit_x >= lower) & (fit_x <= upper)
+            if np.count_nonzero(fit) < 2:
+                raise ValueError("Select a fit range with at least two overlapping points.")
+            phase = aligned[fit]
+            centered = phase - phase.mean()
+            norm = float(np.dot(centered, centered))
+            if norm > 0:
+                segment = observed[fit]
+                scales.append(float(np.dot(centered, segment - segment.mean()) / norm))
+                fitted.append((lower, upper))
+        if not scales:
             raise ValueError("The selected fit range has no variation in the phase reference.")
-        factor = max(0.0, float(np.dot(centered, observed - observed.mean()) / norm))
-        parameters["fit_range"] = [lower, upper]
+        # Independent offsets avoid fitting the background; the median limits
+        # the influence of a single diagnostic window with an unexpected overlap.
+        scale = np.quantile(scales, .25, method="lower") if conservative_scale else np.median(scales)
+        factor = max(0.0, float(scale))
+        if fit_windows is None:
+            parameters["fit_range"] = fitted[0]
+        else:
+            parameters["fit_windows"] = fitted
     if not np.isfinite(factor) or factor < 0:
         raise ValueError("The subtraction factor must be finite and nonnegative.")
     parameters["factor"] = float(factor)

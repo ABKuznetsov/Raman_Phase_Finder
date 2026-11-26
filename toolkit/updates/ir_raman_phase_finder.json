@@ -1,22 +1,23 @@
 {
   "app_id": "ir_raman_phase_finder",
   "name": "Raman Phase Finder",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "channel": "stable",
-  "release_url": "https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/tag/v1.0.1",
+  "release_url": "https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/tag/v1.0.2",
   "assets": [
     {
-      "name": "Raman_Phase_Finder_Setup_1.0.1.exe",
+      "name": "Raman_Phase_Finder_Setup_1.0.2.exe",
       "type": "installer",
       "platform": "windows",
-      "url": "https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.1/Raman_Phase_Finder_Setup_1.0.1.exe",
-      "sha256": "26ce22c503ab07fa9690e05763528fa47d0283309a088a8bb6866241e43a98dc",
-      "size_bytes": 4256201
+      "url": "https://github.com/ABKuznetsov/Raman_Phase_Finder/releases/download/v1.0.2/Raman_Phase_Finder_Setup_1.0.2.exe",
+      "sha256": "f25f2568eff26153fbd927f89a8451580825f72467a6ac024c04d0b68b12971c",
+      "size_bytes": 4276727
     }
   ],
   "summary": [
-    "Keep line thickness and marker size proportional when exporting high-resolution JPG and PNG figures.",
-    "Use the Raman name and a 180 mm default width for figure exports.",
-    "Download, verify, and start future Windows updates from the confirmation dialog."
+    "Fit multiple phases with independent peak widths and intensities.",
+    "Add leader lines from peaks to labels and simplify the plot legend.",
+    "Keep reference searches responsive and remember enabled databases.",
+    "Add instrument profiles, WURM reference data, and measured phase subtraction."
   ]
 }

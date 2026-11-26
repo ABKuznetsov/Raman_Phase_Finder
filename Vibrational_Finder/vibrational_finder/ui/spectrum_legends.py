@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from html import escape
 from math import isfinite
 
@@ -11,7 +11,8 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QColor
 
 from vibrational_finder.models import ObservedSpectrum
-from vibrational_finder.plot_export.metadata import CanvasLayer, canvas_item_tag, tag_canvas_item
+from vibrational_finder.plot_export.metadata import CanvasLayer, tag_canvas_item
+from vibrational_finder.ui.plot_trace_geometry import trace_scene_intervals, visible_plot_traces
 
 
 PHASE_LEGEND_CHOICES = (
@@ -28,29 +29,21 @@ def multi_legend_mode(settings: Mapping[str, object]) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class LegendSample:
-    kind: str
-    text: str = ""
-
-
-@dataclass(frozen=True, slots=True)
 class PhaseLegendEntry:
     key: str
     name: str
     color: str
-    samples: tuple[LegendSample, ...] = ()
 
 
 class _LegendText(pg.TextItem):
-    def __init__(self, rows, entries, color, *, font_size, text_color, anchor, on_move=None) -> None:
+    def __init__(self, entries, color, *, font_size, text_color, anchor, on_move=None,
+                 spectrum_name="", experiment_color=None) -> None:
         super().__init__("", anchor=anchor, fill=pg.mkBrush(255, 255, 255, 230),
                          border=pg.mkPen(color, width=0.8, cosmetic=False))
         self.legend_entries = tuple(entries)
-        phase_html, self._swatches = _phase_html(self.legend_entries, text_color)
-        if phase_html:
-            rows = [*rows, phase_html]
+        contents, self._swatches = _legend_html(self.legend_entries, text_color, spectrum_name, experiment_color)
         self.textItem.document().setDocumentMargin(3.0)
-        self.setHtml(_text_box_html("<br>".join(rows), font_size))
+        self.setHtml(f'<div style="font-size:{font_size:g}pt;">{contents}</div>')
         self.setZValue(100)
         self.natural_width = self.boundingRect().width()
         self._on_move = on_move
@@ -63,7 +56,6 @@ class _LegendText(pg.TextItem):
             return
         # Inline nonbreaking spaces reserve room for native Qt graphics.
         # Draw them with the same painter as the box so SVG/PDF keep vectors.
-        styles = {"dash": Qt.PenStyle.DashLine, "dot": Qt.PenStyle.DotLine}
         document = self.textItem.document()
         block = document.begin()
         painter.save()
@@ -84,13 +76,10 @@ class _LegendText(pg.TextItem):
                             origin = self.textItem.mapToParent(layout.position())
                             y = origin.y() + line.y() + line.height() * .55
                             x = origin.x() + (left + right) / 2
-                            painter.setPen(pg.mkPen(color, width=1.3, cosmetic=False,
-                                                    style=styles.get(kind, Qt.PenStyle.SolidLine)))
+                            painter.setPen(pg.mkPen(color, width=1.3, cosmetic=False))
                             if kind == "marker":
                                 painter.setBrush(pg.mkBrush(color))
                                 painter.drawEllipse(QPointF(x, y), 3, 3)
-                            elif kind == "tick":
-                                painter.drawLine(QPointF(x, y - 4), QPointF(x, y + 4))
                             else:
                                 painter.drawLine(QPointF(origin.x() + left + 1, y),
                                                  QPointF(origin.x() + right - 2, y))
@@ -132,27 +121,23 @@ class _SpectrumBox:
     baseline: float
 
 
-def _phase_html(entries: Sequence[PhaseLegendEntry], text_color: str):
-    entries_html = []
+def _legend_html(entries: Sequence[PhaseLegendEntry], text_color: str, spectrum_name: str, experiment_color: str | None):
     swatches = {}
-    for entry in entries:
-        color = escape(entry.color)
-        samples = []
-        for sample in entry.samples:
-            if sample.text:
-                samples.append(f'<span style="color:{color};">{escape(sample.text)}</span>')
-            else:
-                href = f"sample-{len(swatches)}"
-                swatches[href] = (sample.kind, entry.color)
-                space = "&nbsp;" * (3 if sample.kind in {"marker", "tick"} else 5)
-                samples.append(f'<a href="{href}" style="text-decoration:none;">{space}</a>')
-        name = f'<span style="color:{text_color if samples else color};">{escape(entry.name)}</span>'
-        entries_html.append(" ".join((*samples, name)))
-    return "&nbsp; ".join(entries_html), swatches
 
+    def swatch(kind, color, width):
+        href = f"sample-{len(swatches)}"
+        swatches[href] = (kind, color)
+        return f'<a href="{href}" style="text-decoration:none;">{"&nbsp;" * width}</a>'
 
-def _text_box_html(contents: str, font_size: float) -> str:
-    return f'<div style="font-size:{font_size:g}pt;">{contents}</div>'
+    rows = []
+    if spectrum_name:
+        line = swatch("line", experiment_color, 5) + " " if experiment_color is not None else ""
+        rows.append(f'{line}<span style="color:{text_color}; font-weight:600;">{escape(spectrum_name)}</span>')
+    if entries:
+        names = (f'{swatch("marker", entry.color, 3)} <span style="color:{text_color};">{escape(entry.name)}</span>'
+                 for entry in entries)
+        rows.append("&nbsp; ".join(names))
+    return "<br>".join(rows), swatches
 
 
 def _saved_position(value: object) -> tuple[float, float] | None:
@@ -170,7 +155,9 @@ class _LegendLayer:
         self.plot = plot
         self.view = plot.getViewBox()
         self.boxes: dict[str, _SpectrumBox] = {}
-        self.traces: list[tuple[np.ndarray, np.ndarray, float]] = []
+        self.traces: list[tuple[np.ndarray, np.ndarray]] = []
+        self.trace_baselines: list[float] = []
+        self.multi = False
         self.common: _LegendText | None = None
         self.common_position: tuple[float, float] | None = None
         self.view.sigRangeChanged.connect(self.layout)
@@ -182,6 +169,8 @@ class _LegendLayer:
                 self.plot.removeItem(item)
         self.boxes.clear()
         self.traces.clear()
+        self.trace_baselines.clear()
+        self.multi = multi
         self.common = None
         key = "reference_legend_position" if independent_entries else "multi_common_legend_position"
         self.common_position = _saved_position(settings.get(key))
@@ -200,48 +189,44 @@ class _LegendLayer:
         positions = settings.get("multi_legend_positions" if multi else "single_legend_positions")
         positions = positions if isinstance(positions, Mapping) else {}
         traces = {}
-        for item in self.plot.listDataItems():
-            tag = canvas_item_tag(item)
-            if tag is None or not item.isVisible():
-                continue
-            if (tag.object_id or "").startswith("subtraction-experiment-"):
-                traces.setdefault(tag.owner_id, item)
-            elif tag.layer == CanvasLayer.OBSERVED or (tag.object_id or "").startswith("subtraction-residual-"):
-                traces[tag.owner_id] = item
+        experiments = {}
+        for item, tag, samples in visible_plot_traces(self.plot):
+            object_id = tag.object_id or ""
+            self.traces.append(samples)
+            if object_id.startswith("subtraction-experiment-"):
+                experiments[tag.owner_id] = item
+                traces.setdefault(tag.owner_id, (item, samples[1]))
+            elif object_id.startswith("subtraction-residual-"):
+                traces[tag.owner_id] = (item, samples[1])
+            elif tag.layer == CanvasLayer.OBSERVED:
+                experiments[tag.owner_id] = item
+                traces[tag.owner_id] = (item, samples[1])
         common: dict[str, PhaseLegendEntry] = {
             entry.key: entry for entry in independent_entries if names_visible
         }
         for spectrum in spectra:
-            trace = traces.get(spectrum.id)
+            trace, y = traces.get(spectrum.id, (None, spectrum.y))
             entries = phases_by_spectrum.get(spectrum.id, ())
             if trace is None and not entries:
                 continue
-            x, y = (np.asarray(values, dtype=float) for values in trace.getData()) if trace is not None else (
-                np.asarray(spectrum.x, dtype=float), np.asarray(spectrum.y, dtype=float),
-            )
-            finite = np.isfinite(x) & np.isfinite(y)
-            x, y = x[finite], y[finite]
+            y = np.asarray(y, dtype=float)
+            y = y[np.isfinite(y)]
             baseline = float(y.min()) if y.size else 0.0
             if trace is not None and y.size:
-                order = np.argsort(x, kind="stable")
-                self.traces.append((x[order], y[order], baseline))
+                self.trace_baselines.append(baseline)
             if mode == "common":
                 for entry in entries:
-                    previous = common.get(entry.key)
-                    if previous is None:
-                        common[entry.key] = entry
-                    else:
-                        samples = {sample.kind: sample for sample in (*entry.samples, *previous.samples)}
-                        common[entry.key] = replace(previous, samples=tuple(samples.values()))
-            color = pg.mkPen(trace.opts["pen"]).color().name() if trace is not None else text_color
-            name = f'<span style="color:{color}; font-weight:600;">{escape(spectrum.name)}</span>'
-            rows = [name] if names_visible else []
+                    common.setdefault(entry.key, entry)
+            experiment = experiments.get(spectrum.id)
+            experiment_color = pg.mkPen(experiment.opts["pen"]).color().name() if experiment is not None else None
+            name = spectrum.name if names_visible else ""
             local = entries if mode == "individual" else ()
-            if not rows and not local:
+            if not name and not local:
                 continue
             item = _LegendText(
-                rows, local, color, font_size=font_size, text_color=text_color, anchor=(1, .5),
+                local, experiment_color or text_color, font_size=font_size, text_color=text_color, anchor=(1, .5),
                 on_move=lambda x, y, owner=spectrum.id: self._move(owner, x, y, on_move),
+                spectrum_name=name, experiment_color=experiment_color,
             )
             self.boxes[spectrum.id] = _SpectrumBox(
                 item, _saved_position(positions.get(spectrum.id)), baseline,
@@ -250,7 +235,7 @@ class _LegendLayer:
                             object_id=f"spectrum-legend-{spectrum.id}")
             self.plot.addItem(item, ignoreBounds=True)
         if common:
-            self.common = _LegendText([], tuple(common.values()), "#c5c5c5", anchor=(0, 0),
+            self.common = _LegendText(tuple(common.values()), "#c5c5c5", anchor=(0, 0),
                                       font_size=font_size, text_color=text_color,
                                       on_move=lambda x, y: self._move(None, x, y, on_move))
             tag_canvas_item(self.common, layer=CanvasLayer.LEGEND, object_id="common-phase-legend")
@@ -273,28 +258,30 @@ class _LegendLayer:
         if bounds.isEmpty():
             return
         occupied: list[QRectF] = []
-        if self.common is not None and self.common in self.plot.plotItem.items:
-            self._place(self.common, bounds, occupied, manual=self.common_position)
-        # Place manual boxes first, then find space for the ones that follow the curves.
-        for box in sorted(self.boxes.values(), key=lambda entry: entry.manual is None):
-            if box.item in self.plot.plotItem.items:
-                self._place(box.item, bounds, occupied, manual=box.manual, baseline=box.baseline)
+        entries = [(self.common, self.common_position, None)] if self.common is not None else []
+        entries.extend((box.item, box.manual, box.baseline) for box in self.boxes.values())
+        for item, manual, baseline in sorted(entries, key=lambda entry: entry[1] is None):
+            if item in self.plot.plotItem.items:
+                self._place(item, bounds, occupied, manual=manual, baseline=baseline)
 
     def _place(self, item, bounds: QRectF, occupied: list[QRectF], *, manual, baseline=None) -> None:
-        item.wrap_to(bounds.width() * .78)
+        common = baseline is None
+        use_corner = common or not self.multi
+        item.wrap_to(bounds.width() * (.46 if use_corner else .78))
         width, height = item.boundingRect().size().toTuple()
         max_x, max_y = bounds.right() - width, bounds.bottom() - height
         if max_x < bounds.left() or max_y < bounds.top():
             item.setVisible(False)
             return
-        common = baseline is None
         if manual is not None:
             point = self.view.mapViewToScene(QPointF(*manual))
             x = point.x() - (0 if common else width)
             y = point.y() - (0 if common else height / 2)
             position = (float(np.clip(x, bounds.left(), max_x)), float(np.clip(y, bounds.top(), max_y)))
         else:
-            position = self._find_space(bounds, width, height, occupied, baseline)
+            position = self._find_corner(bounds, width, height, occupied) if use_corner else None
+            if position is None:
+                position = self._find_space(bounds, width, height, occupied, None if use_corner else baseline)
             if position is None:
                 # Dense traces can leave no completely free rectangle.
                 # Keep the box reachable so it can still be dragged.
@@ -305,6 +292,16 @@ class _LegendLayer:
         anchor = QPointF(x, y) if common else QPointF(x + width, y + height / 2)
         item.setPos(self.view.mapSceneToView(anchor))
 
+    def _find_corner(self, bounds: QRectF, width: float, height: float, occupied):
+        left, right = bounds.left(), bounds.right() - width
+        top, bottom = bounds.top(), bounds.bottom() - height
+        for y in (top, bottom):
+            for x in (right, left):
+                blocked = self._blocked_intervals(x, x + width, occupied)
+                if not any(start - 5 < y + height and stop + 5 > y for start, stop in blocked):
+                    return x, y
+        return None
+
     def _find_space(self, bounds: QRectF, width: float, height: float, occupied, baseline):
         """Prefer the gap for this spectrum, falling back only to trace-free space."""
         top, bottom = bounds.top(), bounds.bottom()
@@ -312,15 +309,14 @@ class _LegendLayer:
         common = baseline is None
         preferred_top, preferred_bottom = top, bottom
         if not common:
-            above = min((level for _, _, level in self.traces if level > baseline), default=None)
+            above = min((level for level in self.trace_baselines if level > baseline), default=None)
             if above is not None:
                 preferred_top = max(top, self.view.mapViewToScene(QPointF(0, above)).y())
             preferred_bottom = min(bottom, self.view.mapViewToScene(QPointF(0, baseline)).y())
         target = top if common else preferred_bottom - height
         fallback = None
         for x in np.linspace(left, right, 16) if common else np.linspace(right, left, 16):
-            blocked = self._trace_intervals(x, x + width)
-            blocked.extend((r.top(), r.bottom()) for r in occupied if r.left() < x + width and r.right() > x)
+            blocked = self._blocked_intervals(x, x + width, occupied)
             for start, stop in _free_spans(top, bottom, blocked):
                 low, high = max(start, preferred_top), min(stop, preferred_bottom)
                 if high - low >= height:
@@ -332,17 +328,9 @@ class _LegendLayer:
                         fallback = (distance, x, y)
         return fallback[1:] if fallback is not None else None
 
-    def _trace_intervals(self, left: float, right: float) -> list[tuple[float, float]]:
-        low, high = sorted(self.view.mapSceneToView(QPointF(x, 0)).x() for x in (left, right))
-        blocked = []
-        for grid, trace, _ in self.traces:
-            if high < grid[0] or low > grid[-1]:
-                continue
-            start = int(np.searchsorted(grid, low))
-            stop = int(np.searchsorted(grid, high, side="right"))
-            finite = trace[max(0, start - 1):stop + 1]
-            a, b = (self.view.mapViewToScene(QPointF(0, float(y))).y() for y in (finite.min(), finite.max()))
-            blocked.append((min(a, b), max(a, b)))
+    def _blocked_intervals(self, left: float, right: float, occupied):
+        blocked = trace_scene_intervals(self.view, self.traces, left, right)
+        blocked.extend((r.top(), r.bottom()) for r in occupied if r.left() < right and r.right() > left)
         return blocked
 
 

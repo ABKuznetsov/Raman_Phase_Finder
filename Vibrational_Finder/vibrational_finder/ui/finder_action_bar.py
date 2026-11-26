@@ -22,7 +22,7 @@ class FinderActionBar(QWidget):
     _SECTIONS = (
         ("smooth", "Smoothing", "Configure smoothing for the active spectrum."),
         ("background", "Background", "Estimate and remove the spectral background."),
-        ("phase_deconvolution", "Phase deconvolution", "Subtract modeled bands of accepted phases above the background."),
+        ("phase_deconvolution", "Phase deconvolution", "Subtract another spectrum or modeled bands of accepted phases."),
         ("crop", "Crop spectrum", "Limit the active spectral range."),
         ("despike", "Despike", "Remove narrow acquisition spikes."),
         ("normalize", "Normalization", "Configure spectrum normalization."),

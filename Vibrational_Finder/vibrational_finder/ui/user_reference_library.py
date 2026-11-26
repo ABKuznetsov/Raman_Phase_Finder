@@ -17,6 +17,7 @@ from vibrational_finder.ui.reference_editor import ReferenceEditorDialog
 _IMPORT_FILTER = "Raman reference cards (*.rref *.json *.vsref);;All files (*)"
 _RREF_FILTER = "Raman reference card (*.rref)"
 _JSON_FILTER = "JSON card (*.json)"
+_LIBRARY_FILTER = "Raman user library (*.json)"
 
 
 class UserReferenceLibraryDialog(QDialog):
@@ -51,6 +52,18 @@ class UserReferenceLibraryDialog(QDialog):
         close.clicked.connect(self.close)
         controls.addWidget(close)
         layout.addLayout(controls)
+
+        library_controls = QHBoxLayout()
+        self.import_library_button = QPushButton("Import library…")
+        self.import_library_button.setToolTip("Merge a JSON library into your current library.")
+        self.import_library_button.clicked.connect(self._import_library)
+        self.export_library_button = QPushButton("Export library…")
+        self.export_library_button.setToolTip("Export all Raman cards with spectra and band assignments to one JSON file.")
+        self.export_library_button.clicked.connect(self._export_library)
+        library_controls.addWidget(self.import_library_button)
+        library_controls.addWidget(self.export_library_button)
+        library_controls.addStretch(1)
+        layout.addLayout(library_controls)
 
         self.table = QTableWidget(0, 4)
         self.table.setHorizontalHeaderLabels(["Reference", "Formula", "Bands", "Source"])
@@ -102,6 +115,7 @@ class UserReferenceLibraryDialog(QDialog):
         selected = self._selected_id() in self.cards
         self.edit_button.setEnabled(selected)
         self.export_button.setEnabled(selected)
+        self.export_library_button.setEnabled(bool(self.cards))
 
     def add_reference(self) -> None:
         self._open_editor(None)
@@ -143,6 +157,44 @@ class UserReferenceLibraryDialog(QDialog):
             QMessageBox.warning(self, "Reference import failed", str(exc))
             return
         self._save(payload)
+
+    def _import_library(self) -> None:
+        name, _ = QFileDialog.getOpenFileName(self, "Import Raman user library", "", _LIBRARY_FILTER)
+        if not name:
+            return
+        try:
+            result = self.store.import_library(Path(name))
+        except (OSError, ValueError, RecursionError) as exc:
+            QMessageBox.warning(self, "Library import failed", str(exc))
+            return
+        if result.added:
+            self.refresh()
+            self.libraryChanged.emit()
+        lines = [f"Added: {result.added}", f"Duplicates skipped: {result.duplicates}"]
+        if result.skipped_infrared:
+            lines.append(f"Infrared cards skipped: {result.skipped_infrared}")
+        if result.conflicts:
+            lines.append(f"Cards kept with new IDs: {result.conflicts}")
+        if result.backup_path:
+            lines.append(f"Backup: {result.backup_path}")
+        QMessageBox.information(self, "Library import complete", "\n".join(lines))
+
+    def _export_library(self) -> None:
+        name, _ = QFileDialog.getSaveFileName(
+            self, "Export Raman user library", "raman_user_library.json", _LIBRARY_FILTER,
+        )
+        if not name:
+            return
+        try:
+            entered = Path(name)
+            target = entered if entered.suffix.lower() == ".json" else entered.with_suffix(".json")
+            if target != entered and target.exists():
+                raise ValueError(f"{target.name} already exists. Select that exact filename to replace it.")
+            count = self.store.export_library(target)
+        except (OSError, ValueError, RecursionError) as exc:
+            QMessageBox.warning(self, "Library export failed", str(exc))
+            return
+        QMessageBox.information(self, "Library export complete", f"Exported {count} references to:\n{target}")
 
     def _save(self, payload: dict, *, card_id: str | None = None) -> None:
         try:

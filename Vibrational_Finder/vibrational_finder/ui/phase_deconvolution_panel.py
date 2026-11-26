@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (
 )
 
 from vibrational_finder.models import SpectralBand
+from vibrational_finder.services.phase_deconvolution import PhaseSubtractionFit, matched_reference_positions
 
 
 class PhaseDeconvolutionPanel(QWidget):
@@ -17,6 +18,7 @@ class PhaseDeconvolutionPanel(QWidget):
 
     saveRequested = Signal()
     cancelRequested = Signal()
+    chooseSpectrumRequested = Signal()
     layerToggled = Signal(str, str, bool)
     backgroundToggled = Signal(bool)
     displayChanged = Signal()
@@ -29,11 +31,10 @@ class PhaseDeconvolutionPanel(QWidget):
         super().__init__()
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 2, 0, 2)
-        description = QLabel(
-            "Accepted phases are subtracted automatically. The table controls only what is shown.",
-        )
-        description.setWordWrap(True)
-        layout.addWidget(description)
+        self.choose_spectrum_button = QPushButton("Choose spectrum to subtract…")
+        self.choose_spectrum_button.clicked.connect(self.chooseSpectrumRequested)
+        self.choose_spectrum_button.setToolTip("Use another measured spectrum. No reference card is required.")
+        layout.addWidget(self.choose_spectrum_button)
         self.experiment_visible = QCheckBox("Experiment")
         self.residual_visible = QCheckBox("Residual (dashed)")
         self.experiment_visible.setChecked(experiment_visible)
@@ -52,6 +53,10 @@ class PhaseDeconvolutionPanel(QWidget):
         self.phase_table = table
         table.setHorizontalHeaderLabels(("Phase", *(label for label, _key, _default in self.DISPLAY_COLUMNS)))
         table.horizontalHeaderItem(3).setToolTip("Vibration type")
+        table.horizontalHeaderItem(4).setToolTip(
+            "Split tick: reference (lower) and measured (upper) positions. "
+            "Hollow diamond: reference position without a unique match.",
+        )
         table.verticalHeader().hide()
         table.setSelectionMode(QTableWidget.SelectionMode.NoSelection)
         header = table.horizontalHeader()
@@ -72,21 +77,38 @@ class PhaseDeconvolutionPanel(QWidget):
         close_button.clicked.connect(self.cancelRequested)
         row.addWidget(close_button)
         layout.addLayout(row)
-        self.status = QLabel("" if phases else "Accept a phase with reference bands first.")
+        self.status = QLabel("" if phases else "No card-based phases selected.")
         self.status.setWordWrap(True)
         layout.addWidget(self.status)
 
-    def set_phases(self, phases: dict[str, tuple[str, str, tuple[SpectralBand, ...]]], layer_settings: dict) -> None:
+    def set_phases(
+        self, phases: dict[str, tuple[str, str, tuple[SpectralBand, ...]]], layer_settings: dict,
+        *, fit: PhaseSubtractionFit | None = None,
+    ) -> None:
         self.phases = phases
         self._phase_keys = tuple(phases)
         table = self.phase_table
+        paired = matched_reference_positions(fit.bands) if fit is not None else {}
+        contributing = {band.phase_key for band in fit.bands if band.removed and any(band.curve_y)} if fit else set()
         with QSignalBlocker(table):
             table.setRowCount(len(phases))
-            for row, (name, color, bands) in enumerate(phases.values()):
+            for row, (key, (name, color, bands)) in enumerate(phases.items()):
                 phase = QTableWidgetItem(name)
                 phase.setFlags(Qt.ItemFlag.ItemIsEnabled)
                 phase.setData(Qt.ItemDataRole.DecorationRole, QColor(color))
                 phase.setToolTip(f"{name} · {len(bands)} reference bands")
+                if fit is not None:
+                    in_range = {band.position for band in bands if fit.x[0] <= band.position <= fit.x[-1]}
+                    matches = paired.get(key, set())
+                    # A verified pair can straddle a measured range boundary.
+                    total = len(in_range | matches)
+                    count = len(matches)
+                    phase.setText(f"{name} ({count}/{total})")
+                    phase.setToolTip(
+                        f"{name} · {count} of {total} reference positions uniquely matched."
+                        + (" No uniquely matched bands for subtraction." if not count else
+                           " No contribution subtracted." if key not in contributing else "")
+                    )
                 table.setItem(row, 0, phase)
                 for column, (label, _key, _default) in enumerate(self.DISPLAY_COLUMNS, 1):
                     item = QTableWidgetItem()

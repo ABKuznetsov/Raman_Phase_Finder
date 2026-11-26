@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+import logging
 from typing import TYPE_CHECKING
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal, Slot
 
 from vibrational_finder.services.source_management import SpectroscopySourceManager
 from vibrational_finder.ui.background_task import BackgroundTaskHandle, BackgroundTaskLane
@@ -27,6 +28,8 @@ class SourceManagementJobController(QObject):
     downloadBlocked = Signal(str, object)
     cancelled = Signal(str, str)
     runningChanged = Signal(bool)
+    progress = Signal(str, str)
+    _worker_progress = Signal(object, str)
 
     def __init__(
         self,
@@ -43,13 +46,20 @@ class SourceManagementJobController(QObject):
         self._current: BackgroundTaskHandle | None = None
         self._current_context: tuple[str, str] | None = None
         self._handles: list[BackgroundTaskHandle] = []
+        self._worker_progress.connect(self._deliver_progress, Qt.ConnectionType.QueuedConnection)
 
     def start(
         self, name: str, operation: str, package_key: str | None = None, *, local_archive: str | None = None,
     ) -> BackgroundTaskHandle:
         self.cancel()
         manager = self.manager
-        task = lambda: self._run(manager, name, operation, package_key, local_archive=local_archive)
+
+        def task() -> object:
+            return self._run(
+                manager, name, operation, package_key, local_archive=local_archive,
+                report_progress=lambda message: self._worker_progress.emit(handle, message),
+            )
+
         handle = self._handle_factory(task, self)
         self._current = handle
         self._current_context = (name, operation)
@@ -66,12 +76,13 @@ class SourceManagementJobController(QObject):
     def _run(
         manager: SpectroscopySourceManager, name: str, operation: str, package_key: str | None, *,
         local_archive: str | None = None,
+        report_progress: Callable[[str], None] | None = None,
     ) -> object:
         if operation == "update":
             from vibrational_finder.services.rruff_source import RruffDownloadBlocked
 
             try:
-                return manager.update(name, package_key)
+                return manager.update(name, package_key, report_progress=report_progress)
             except RruffDownloadBlocked as exc:
                 return RruffManualDownload(exc.archive)
         if operation == "import_archive" and package_key is not None and local_archive is not None:
@@ -99,6 +110,11 @@ class SourceManagementJobController(QObject):
     def is_running(self) -> bool:
         return self._current is not None
 
+    @Slot(object, str)
+    def _deliver_progress(self, handle: BackgroundTaskHandle, message: str) -> None:
+        if handle is self._current and self._current_context is not None:
+            self.progress.emit(self._current_context[0], message)
+
     def _finished(self, handle: BackgroundTaskHandle, result: object) -> None:
         if handle is not self._current or self._current_context is None:
             return
@@ -115,6 +131,7 @@ class SourceManagementJobController(QObject):
         if handle is not self._current or self._current_context is None:
             return
         name, operation = self._current_context
+        logging.getLogger(__name__).warning("%s %s failed: %s\n%s", name, operation, message, details)
         self._current = None
         self._current_context = None
         self.runningChanged.emit(False)

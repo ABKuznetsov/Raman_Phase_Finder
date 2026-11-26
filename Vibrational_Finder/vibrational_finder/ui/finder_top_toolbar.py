@@ -29,6 +29,7 @@ class FinderTopToolbar(QWidget):
     exportRequested = Signal()
     plotSettingsRequested = Signal()
     databaseRequested = Signal()
+    instrumentProfilesRequested = Signal()
     resetProcessingRequested = Signal()
     fitPlotRequested = Signal()
     spectralSettingsRequested = Signal()
@@ -69,6 +70,10 @@ class FinderTopToolbar(QWidget):
         self.reset_button = self._button("reset", "Reset processing", "Restore the active spectrum", self.resetProcessingRequested)
         self.fit_button = self._button("fit", "Fit plot", "Fit the full spectrum in the plot", self.fitPlotRequested)
         self.database_button = self._button("database", "Manage databases", "Manage spectroscopy sources", self.databaseRequested)
+        self.instrument_profiles_button = self._button(
+            "instrument_profiles", "Instrument", "Choose an instrument profile", self.instrumentProfilesRequested,
+        )
+        self.instrument_profiles_button.setProperty("toolbarIcon", "reference")
         self.plot_button = self._button("plot", "Plot settings", "Configure plot appearance", self.plotSettingsRequested)
         self.instrument_button = self._button("instrument", "Spectral settings", "Configure spectrum settings", self.spectralSettingsRequested)
         self.residual_button.hide()
@@ -84,7 +89,7 @@ class FinderTopToolbar(QWidget):
         self._groups.append(
             self._group(
                 layout,
-                [self.database_button, self.plot_button, self.instrument_button],
+                [self.database_button, self.instrument_profiles_button, self.plot_button, self.instrument_button],
             )
         )
 
@@ -110,8 +115,8 @@ class FinderTopToolbar(QWidget):
             self.reset_button, self.fit_button,
         ]
         self._fallback = [
-            self.import_button, self.reference_button, self.bands_button, self.database_button,
-            self.instrument_button,
+            self.import_button, self.reference_button, self.bands_button, self.instrument_button,
+            self.instrument_profiles_button, self.database_button,
         ]
         self._responsive_buttons = [
             button for button in self._buttons

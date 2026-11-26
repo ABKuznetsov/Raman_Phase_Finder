@@ -63,6 +63,7 @@ class OpenSpecyLibraryInfo:
 class OpenSpecyLibrarySource:
     name = "OpenSpecy"
     band_recipe_version = OPENSPECY_BAND_RECIPE_VERSION
+    require_confirmed_raman = True
 
     def __init__(self, cache_root: str | Path | None = None) -> None:
         self.cache_root = Path(cache_root) if cache_root is not None else app_cache_dir() / "openspecy"
@@ -305,6 +306,11 @@ class OpenSpecyLibrarySource:
         return self.reference_cache.search(query, sources=[self.name])
 
     def load_spectrum(self, candidate: CandidateRecord) -> ReferenceSpectrum:
+        reference = self._read_spectrum(candidate)
+        reference.band_set = self.reference_cache.load_band_set(candidate.key, OPENSPECY_BAND_RECIPE_VERSION)
+        return reference
+
+    def _read_spectrum(self, candidate: CandidateRecord) -> ReferenceSpectrum:
         library = OPENSPECY_LIBRARIES.get(candidate.metadata.get("library", ""))
         path = self.cache_root / library[1] if library else Path(candidate.metadata.get("path", ""))
         if not path.is_file():
@@ -332,16 +338,14 @@ class OpenSpecyLibrarySource:
         if not x.size:
             raise ValueError("OpenSpecy spectrum contains no numeric x/y values")
         order = np.argsort(x, kind="stable")
-        spectrum = ReferenceSpectrum(
+        return ReferenceSpectrum(
             x=x[order].tolist(),
             y=y[order].tolist(),
             kind=candidate.kind,
             name=candidate.name,
             source_path=str(path),
             record=candidate,
-            band_set=self.reference_cache.load_band_set(candidate.key, OPENSPECY_BAND_RECIPE_VERSION),
         )
-        return spectrum
 
     def build_raman_band_index(self) -> tuple[int, int]:
         return self.build_band_index(kind=SignalKind.RAMAN)
@@ -374,7 +378,7 @@ class OpenSpecyLibrarySource:
             if record.key in indexed_keys or (kind is not None and record.kind != kind):
                 continue
             try:
-                reference = self.load_spectrum(record)
+                reference = self._read_spectrum(record)
                 processed = preprocess_spectrum(reference, preprocessing_options)
                 band_set = extract_reference_band_set(
                     processed,

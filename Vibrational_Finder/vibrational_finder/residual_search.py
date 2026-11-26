@@ -16,6 +16,7 @@ from vibrational_finder.preprocessing import preprocess_spectrum
 from vibrational_finder.profile_state import SavedGain
 from vibrational_finder.profile_residual import ProfileResidualFit, fit_profile_residual
 from vibrational_finder.services.candidate_search_service import CandidateSearchOptions, CandidateSearchResult
+from vibrational_finder.services.search_progress import report_search_status
 
 
 class ResidualSearchUnavailable(ValueError):
@@ -108,6 +109,7 @@ class ResidualSearchController:
 
     def run(self, request: ResidualSearchRequest) -> ResidualSearchOutcome:
         if request.gain_input is not None:
+            report_search_status("Checking unexplained Raman bands...")
             evidence = self.gain_cache.prepare(request.gain_input)
             if not evidence.available:
                 raise ResidualSearchUnavailable("Stable Raman bands could not be evaluated for the accepted references")
@@ -131,7 +133,7 @@ class ResidualSearchController:
         profile = self.analysis_controller.project.profile_states.get(request.token.spectrum_id)
         if profile is None:
             return False
-        profile.residual_results = deepcopy(outcome.result.matches)
+        profile.residual_results = list(outcome.result.matches)
         options = request.options
         if outcome.request.gain_input is not None and options.matching_options.gain_window is not None:
             profile.saved_gain = SavedGain(

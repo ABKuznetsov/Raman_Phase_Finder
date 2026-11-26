@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -69,12 +70,17 @@ class SpectroscopySourceManager:
             packages=packages,
         )
 
-    def update(self, name: str, package_key: str | None = None) -> SourceUpdateResult:
+    def update(
+        self, name: str, package_key: str | None = None, *, report_progress: Callable[[str], None] | None = None,
+    ) -> SourceUpdateResult:
         source = self.catalog.source(name)
         packages = self.packages(name)
         if package_key is not None and packages and package_key not in {item.key for item in packages}:
             raise ValueError(f"Unknown package for {name}: {package_key}")
-        if hasattr(source, "download_library"):
+        download_with_progress = getattr(source, "download_library_with_progress", None)
+        if report_progress is not None and callable(download_with_progress):
+            package = download_with_progress(package_key, report_progress)
+        elif hasattr(source, "download_library"):
             package = source.download_library(package_key) if package_key is not None else source.download_library()
         elif hasattr(source, "download_archive"):
             package = source.download_archive(package_key) if package_key is not None else source.download_archive()

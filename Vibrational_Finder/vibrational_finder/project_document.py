@@ -5,39 +5,43 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from vibrational_finder.core.models import SignalTrace
+from vibrational_finder.models import VibrationalMatchResult
 from vibrational_finder.project_state import VibrationalProjectState
+
+
+def _copy_axes(memo: dict[int, object], *axes: object) -> None:
+    for axis in axes:
+        if isinstance(axis, list) and id(axis) not in memo:
+            memo[id(axis)] = axis.copy()
+
+
+def copy_trace_coordinates(memo: dict[int, object], trace: SignalTrace | None) -> None:
+    if trace is not None:
+        _copy_axes(memo, trace.x, trace.y)
+
+
+def copy_match_coordinates(memo: dict[int, object], result: VibrationalMatchResult) -> None:
+    copy_trace_coordinates(memo, result.candidate.reference)
+    copy_trace_coordinates(memo, result.aligned_reference)
+    if result.candidate.card_payload is not None:
+        from vibrational_finder.services.reference_card_io import reference_profiles
+
+        for profile in reference_profiles(result.candidate.card_payload):
+            _copy_axes(memo, profile.get("x"), profile.get("y"))
 
 
 def snapshot_project(state: VibrationalProjectState) -> VibrationalProjectState:
     """Freeze the live document for writing without deep-copying every float."""
-    from vibrational_finder.services.reference_card_io import reference_profiles
-
     memo: dict[int, object] = {}
 
-    def copy_axes(*axes: object) -> None:
-        for axis in axes:
-            if isinstance(axis, list) and id(axis) not in memo:
-                memo[id(axis)] = axis.copy()
-
-    def copy_coordinates(trace: SignalTrace | None) -> None:
-        if trace is not None:
-            copy_axes(trace.x, trace.y)
-
-    def copy_card(result) -> None:
-        copy_coordinates(result.candidate.reference)
-        copy_coordinates(result.aligned_reference)
-        if result.candidate.card_payload is not None:
-            for profile in reference_profiles(result.candidate.card_payload):
-                copy_axes(profile.get("x"), profile.get("y"))
-
     for trace in (*state.raman_spectra, *state.original_observed.values(), *state.reference_spectra):
-        copy_coordinates(trace)
+        copy_trace_coordinates(memo, trace)
     for result in state.working_references:
-        copy_card(result)
+        copy_match_coordinates(memo, result)
     for profile in state.profile_states.values():
-        copy_coordinates(profile.spectrum)
+        copy_trace_coordinates(memo, profile.spectrum)
         for result in (*profile.results, *profile.residual_results, *profile.selected_results):
-            copy_card(result)
+            copy_match_coordinates(memo, result)
     return deepcopy(state, memo)
 
 

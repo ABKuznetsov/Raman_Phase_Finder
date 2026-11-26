@@ -31,6 +31,8 @@ from vibrational_finder.raman_product import require_raman_project
 from vibrational_finder.ui.finder_action_bar import FinderActionBar
 from vibrational_finder.ui.finder_plot_control_bar import FinderPlotControlBar
 from vibrational_finder.ui.finder_top_toolbar import FinderTopToolbar
+from vibrational_finder.ui.instrument_profile_panel import InstrumentProfilePanel
+from vibrational_finder.ui.instrument_profile_store import InstrumentProfileStore
 from vibrational_finder.ui.observed_spectrum_actions import ObservedSpectrumActionsMixin
 from vibrational_finder.ui.plot_display_actions import PlotDisplayActionsMixin
 from vibrational_finder.ui.project_tree import ProjectTree
@@ -48,7 +50,7 @@ from vibrational_finder.ui.vibrational_plot import (
     SpectrumPlotCanvas, create_vibrational_plot_widget, layout_band_annotations, show_observed_spectrum,
     show_reference_layers, show_subtraction_experiment, show_subtraction_layers,
 )
-from vibrational_finder.ui.spectrum_legends import LegendSample, PhaseLegendEntry, REFERENCE_COLOR, show_spectrum_legends
+from vibrational_finder.ui.spectrum_legends import PhaseLegendEntry, REFERENCE_COLOR, show_spectrum_legends
 from vibrational_finder.ui.workspace_preferences import WorkspacePreferences, WorkspaceState
 from vibrational_finder.ui.layout_state import SplitterLayoutState, normalize_splitter_ratios
 from vibrational_finder.services.spectroscopy_source_catalog import SpectroscopySourceCatalog
@@ -161,7 +163,7 @@ class SpectroscopyFinderWindow(
         self.center_splitter.setSizes([520, 260])
         center_layout.addWidget(self.center_splitter, 1)
 
-        self.accepted_components_workspace = AcceptedComponentsWorkspace()
+        self.accepted_components_workspace = AcceptedComponentsWorkspace(allow_measured_subtraction=True)
         self.accepted_components_workspace.table.horizontalHeader().setSectionsMovable(True)
         self._layout_state.register_table("accepted", self.accepted_components_workspace.table)
         self.accepted_components_panel = self.accepted_components_workspace
@@ -185,11 +187,20 @@ class SpectroscopyFinderWindow(
         self.right_tabs.addTab(self.composition_panel, "Elements")
         self.right_tabs.addTab(self.action_bar, "Processing")
         self.right_tabs.addTab(self.compound_details_panel, "Compound details")
+        self.instrument_profiles = InstrumentProfileStore(self.workspace_preferences.settings)
+        self.instrument_profile_panel = InstrumentProfilePanel(self.instrument_profiles)
+        self.right_tabs.addTab(self.instrument_profile_panel, "Instrument")
+        self.instrument_profile_panel.profileChanged.connect(self.candidate_workspace.set_instrument_profile)
+        self.top_toolbar.instrumentProfilesRequested.connect(
+            lambda: self.right_tabs.setCurrentWidget(self.instrument_profile_panel),
+        )
+        self.candidate_workspace.set_instrument_profile(self.instrument_profiles.active)
         self.analysis_tabs = self.right_tabs
 
         self.source_settings_panel = SourceSettingsPanel(
             self.source_catalog, settings=self.workspace_preferences.settings, defer_refresh=defer_source_settings,
         )
+        self.source_settings_panel.sourceSelectionChanged.connect(lambda: self.document.mark_changed())
         self.source_settings_dialog = QDialog(self)
         self.source_settings_dialog.setObjectName("sourceSettingsDialog")
         self.source_settings_dialog.setWindowTitle("Spectroscopy databases")
@@ -419,31 +430,20 @@ class SpectroscopyFinderWindow(
                 panel = self._active_processing_panel if subtraction is not None else None
                 experiment_visible = panel is not None and panel.experiment_visible.isChecked()
                 residual_visible = panel is None or panel.residual_visible.isChecked()
-                drawn_samples = show_subtraction_layers(
+                drawn_phases = show_subtraction_layers(
                     self.spectrum_plot, observed, phase_info, subtraction_bands, settings, offset=offset,
                     normalization=normalization, exportable=subtraction is None, background=background,
                     experiment=(subtraction.x, subtraction.measured) if experiment_visible else None,
                     residual_visible=residual_visible,
+                    references={key: bands for key, (_name, _color, bands) in panel.phases.items()}
+                    if panel is not None else None,
                 )
-                entries = [PhaseLegendEntry(key, name, color, drawn_samples[key])
-                           for key, (name, color) in phase_info.items() if key in drawn_samples]
-                if "" in drawn_samples:
-                    entries.append(PhaseLegendEntry("subtraction-unassigned", "Unassigned bands", "#515661", drawn_samples[""]))
-                if background is not None and settings.get("subtraction_background_visible", True):
-                    entries.insert(0, PhaseLegendEntry("subtraction-background", "Background", "#778392",
-                                                       (LegendSample("dot"),)))
+                entries = [PhaseLegendEntry(key, name, color)
+                           for key, (name, color) in phase_info.items() if key in drawn_phases]
                 show_subtraction_experiment(
                     self.spectrum_plot, observed, subtraction, normalization,
                     experiment_visible=experiment_visible, residual_visible=residual_visible,
                 )
-                if experiment_visible:
-                    entries.insert(0, PhaseLegendEntry("subtraction-experiment", "Experiment", "#47434b",
-                                                       (LegendSample("line"),)))
-                if residual_visible:
-                    color = "#000000" if settings.get("all_observed_black", False) else (
-                        "#d81b60" if observed.kind == SignalKind.RAMAN else "#008ca8"
-                    )
-                    entries.insert(0, PhaseLegendEntry("subtraction-residual", "Residual", color, (LegendSample("dash"),)))
                 phases_by_spectrum[observed.id] = entries
                 if subtraction is not None:
                     continue
@@ -456,7 +456,7 @@ class SpectroscopyFinderWindow(
             accepted = tuple(result for result in results if result.candidate.key in visible_keys)
             if not results and profile is None:
                 continue
-            drawn_samples = show_reference_layers(
+            drawn_phases = show_reference_layers(
                 self.spectrum_plot,
                 results,
                 visible_keys,
@@ -475,15 +475,16 @@ class SpectroscopyFinderWindow(
                 fit_markers=not preserve_view,
                 observed_bands=self.project.sample_bands.get(observed.id, ()) if observed is not None else (),
                 relative_reference_profiles=observed is None and spectrum is None and bool(self.project.working_references),
+                phase_fit=self._plotted_phase_fit(observed) if observed is not None and results else None,
+                normalized=normalized,
                 **label_options,
             )
             entries = phases_by_spectrum.setdefault(observed.id, []) if observed is not None else working_legend
             entries.extend(
                 PhaseLegendEntry(candidate.key, candidate.name or candidate.entry_id,
-                                 self.project.candidate_colors.get(candidate.key, REFERENCE_COLOR),
-                                 drawn_samples.get(candidate.key, ()))
+                                 self.project.candidate_colors.get(candidate.key, REFERENCE_COLOR))
                 for candidate in (result.candidate for result in accepted)
-                if observed is not None or candidate.key in drawn_samples
+                if candidate.key in drawn_phases
             )
         if primary is not None and not preserve_view and any(
             (tag := canvas_item_tag(item)) is not None
@@ -512,6 +513,7 @@ class SpectroscopyFinderWindow(
         self._redraw_candidate_preview()
         if axes_changed:
             self._sync_plot_settings_dialog()
+        self._schedule_phase_overlays(tuple(observed.id for observed, _ in displayed))
 
     def _redraw_candidate_preview(self) -> None:
         plot = self.spectrum_plot

@@ -163,6 +163,10 @@ def window_style(dark: bool = False) -> str:
         QPushButton:disabled, QToolButton:disabled {{ color: {colors['muted']}; background: {colors['bg']}; }}
         QToolButton[databaseHelp="true"] {{ padding: 0; }}
         QToolButton#sourceOptionsButton::menu-indicator {{ image: none; }}
+        QToolButton#candidateExcitationFilter {{ padding: 0; }}
+        QToolButton#candidateExcitationFilter:checked {{ background: {colors['selected']}; border-color: {BRAND_ACCENT_BORDER}; }}
+        QToolButton#candidateExcitationFilter::menu-indicator {{ image: none; width: 0; }}
+        QToolButton#candidateExcitationFilter::down-arrow {{ image: url("{caret}"); width: 12px; height: 12px; }}
         QPushButton[databaseAction="download"]:enabled {{
             background: {colors['database_download']}; border-color: {colors['database_download_border']}; font-weight: 600;
         }}

@@ -3,8 +3,9 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal, Slot
 
+from vibrational_finder.services.search_progress import current_search_status
 from vibrational_finder.ui.background_task import BackgroundTaskHandle, BackgroundTaskLane
 
 
@@ -19,6 +20,8 @@ class AnalysisJobController(QObject):
     cancelled = Signal()
     stale = Signal(object)
     runningChanged = Signal(bool)
+    statusChanged = Signal(str)
+    _worker_status = Signal(object, str)
 
     def __init__(
         self,
@@ -34,12 +37,21 @@ class AnalysisJobController(QObject):
         self._lane = lane if lane is not None else BackgroundTaskLane()
         self._current: BackgroundTaskHandle | None = None
         self._handles: list[BackgroundTaskHandle] = []
+        self._worker_status.connect(self._deliver_status, Qt.ConnectionType.QueuedConnection)
 
     def start(self, request: object) -> BackgroundTaskHandle:
         if self._current is not None:
             self._cancel_current(emit_signal=True)
         controller = self.analysis_controller
-        handle = self._handle_factory(lambda: controller.run(request), self)
+
+        def run() -> object:
+            token = current_search_status.set(lambda message: self._worker_status.emit(handle, message))
+            try:
+                return controller.run(request)
+            finally:
+                current_search_status.reset(token)
+
+        handle = self._handle_factory(run, self)
         self._current = handle
         self._handles.append(handle)
         handle.finished.connect(lambda outcome, active=handle: self._finished(active, outcome))
@@ -66,6 +78,11 @@ class AnalysisJobController(QObject):
 
     def is_running(self) -> bool:
         return self._current is not None
+
+    @Slot(object, str)
+    def _deliver_status(self, handle: BackgroundTaskHandle, message: str) -> None:
+        if handle is self._current:
+            self.statusChanged.emit(message)
 
     def _finished(self, handle: BackgroundTaskHandle, outcome: object) -> None:
         if handle is not self._current:

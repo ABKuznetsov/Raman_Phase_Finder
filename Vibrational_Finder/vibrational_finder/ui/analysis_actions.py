@@ -81,6 +81,8 @@ class SpectroscopyAnalysisActionsMixin(ReferenceCardActionsMixin):
             lambda name: self._start_source_operation(name, "clear_index")
         )
         self.source_management_job_controller.pending.connect(self.source_settings_panel.set_operation_pending)
+        self.source_management_job_controller.progress.connect(self.source_settings_panel.set_operation_progress)
+        self.source_settings_panel.cancelOperationRequested.connect(self.source_management_job_controller.cancel)
         self.source_management_job_controller.succeeded.connect(self._source_operation_succeeded)
         self.source_management_job_controller.downloadBlocked.connect(self.source_settings_panel.offer_rruff_archive)
         self.source_management_job_controller.failed.connect(
@@ -95,6 +97,7 @@ class SpectroscopyAnalysisActionsMixin(ReferenceCardActionsMixin):
         self.accepted_components_workspace.clearRequested.connect(self._clear_components)
         self.accepted_components_workspace.exportRequested.connect(self._export_selected_references)
         self.analysis_job_controller.pending.connect(lambda _request: self.candidate_workspace.set_pending())
+        self.analysis_job_controller.statusChanged.connect(self.candidate_workspace.set_search_progress)
         self.analysis_job_controller.succeeded.connect(self._ordinary_search_succeeded)
         self.analysis_job_controller.failed_for_request.connect(self._analysis_failed)
         self.analysis_job_controller.cancelled.connect(self.candidate_workspace.set_cancelled)
@@ -107,6 +110,7 @@ class SpectroscopyAnalysisActionsMixin(ReferenceCardActionsMixin):
             lambda message, _details: self.candidate_workspace.finish_browse(f"Database search failed: {message}")
         )
         self.residual_job_controller.pending.connect(lambda _request: self.candidate_workspace.set_pending(gain=True))
+        self.residual_job_controller.statusChanged.connect(self.candidate_workspace.set_search_progress)
         self.residual_job_controller.succeeded.connect(self._residual_search_succeeded)
         self.residual_job_controller.failed_for_request.connect(self._analysis_failed)
         self.residual_job_controller.cancelled.connect(self.candidate_workspace.set_cancelled)
@@ -230,6 +234,7 @@ class SpectroscopyAnalysisActionsMixin(ReferenceCardActionsMixin):
                 auto_match=staged_match,
                 primary_raman=staged_match and self._search_mode == "auto",
                 candidate_gate=lambda candidate: query.allows_formula(candidate.formula),
+                instrument_profile=self.instrument_profiles.active,
                 peak_priority=self.auto_search_setup.peak_priority
                 if staged_match and self._search_mode == "auto" and spectrum.kind == SignalKind.RAMAN
                 else RamanPeakPriority.OFF,
@@ -267,7 +272,11 @@ class SpectroscopyAnalysisActionsMixin(ReferenceCardActionsMixin):
         if automatic and gain is None:
             self.candidate_workspace.set_failed("Stable Raman bands could not be evaluated for the accepted references")
             return
-        options = CandidateSearchOptions(auto_match=automatic, candidate_gate=lambda candidate: query.allows_formula(candidate.formula))
+        options = CandidateSearchOptions(
+            auto_match=automatic,
+            candidate_gate=lambda candidate: query.allows_formula(candidate.formula),
+            instrument_profile=self.instrument_profiles.active,
+        )
         if gain is not None:
             options.peak_priority = self.auto_search_setup.peak_priority
         try:

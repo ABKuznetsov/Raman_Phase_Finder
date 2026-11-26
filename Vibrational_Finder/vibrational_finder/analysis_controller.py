@@ -10,7 +10,7 @@ from vibrational_finder.cancellation import JobCancelled, checkpoint
 from vibrational_finder.core.data_sources import SourceQuery
 from vibrational_finder.models import ObservedSpectrum, SpectralBand
 from vibrational_finder.profile_state import SpectrumProfileState
-from vibrational_finder.project_document import ProjectDocument
+from vibrational_finder.project_document import ProjectDocument, copy_match_coordinates, copy_trace_coordinates
 from vibrational_finder.project_model import observed_by_id
 from vibrational_finder.services.candidate_search_service import (
     CandidateSearchOptions,
@@ -18,6 +18,7 @@ from vibrational_finder.services.candidate_search_service import (
     CandidateSearchService,
 )
 from vibrational_finder.services.spectroscopy_source_catalog import CatalogSourceHandle
+from vibrational_finder.services.search_progress import report_search_status
 
 
 def _digest(value: object) -> str:
@@ -148,7 +149,10 @@ class AnalysisController:
         source_tuple = tuple(sources)
         enabled_names = set(self._enabled_source_names(source_tuple))
         enabled_sources = tuple(source for source in source_tuple if self._source_settings_name(source) in enabled_names)
-        observed = deepcopy(self._spectrum(spectrum_id))
+        spectrum = self._spectrum(spectrum_id)
+        memo: dict[int, object] = {}
+        copy_trace_coordinates(memo, spectrum)
+        observed = deepcopy(spectrum, memo)
         observed_bands = tuple(deepcopy(self.project.sample_bands.get(spectrum_id, []))) if use_sample_bands else ()
         query_copy = deepcopy(query)
         return AnalysisSearchRequest(
@@ -166,6 +170,7 @@ class AnalysisController:
         for source in request.sources:
             checkpoint()
             if isinstance(source, CatalogSourceHandle):
+                report_search_status(f"Opening {source.name}...")
                 try:
                     sources.append(source.open())
                 except JobCancelled:
@@ -176,15 +181,24 @@ class AnalysisController:
                 sources.append(source)
         if unavailable and not sources:
             raise ValueError(f"No enabled source is available: {', '.join(sorted(unavailable))}")
+        memo: dict[int, object] = {}
+        copy_trace_coordinates(memo, request.observed)
+        report_search_status("Comparing Raman bands...")
         result = CandidateSearchService(sources).search(
             deepcopy(request.query),
-            deepcopy(request.observed),
+            deepcopy(request.observed, memo),
             deepcopy(request.options),
             observed_bands=list(deepcopy(request.observed_bands)),
             prefilter_bands=list(deepcopy(request.observed_bands)) or None,
         )
         result.source_failures.update(unavailable)
-        return AnalysisSearchOutcome(request=request, result=result)
+        # Detach profiles here, before handing the result to the GUI thread.
+        report_search_status("Preparing the candidate list...")
+        memo = {}
+        for match in result.matches:
+            checkpoint()
+            copy_match_coordinates(memo, match)
+        return AnalysisSearchOutcome(request=request, result=deepcopy(result, memo))
 
     def apply_if_current(self, outcome: AnalysisSearchOutcome) -> bool:
         request = outcome.request
@@ -195,7 +209,7 @@ class AnalysisController:
         if profile is None:
             profile = SpectrumProfileState(spectrum=spectrum)
             self.project.profile_states[spectrum.id] = profile
-        result = deepcopy(outcome.result)
+        result = outcome.result
         profile.spectrum = spectrum
         merged_results = list(result.matches)
         result_keys = {item.candidate.key for item in merged_results}
@@ -205,9 +219,11 @@ class AnalysisController:
         profile.results = merged_results
         profile.residual_results.clear()
         profile.saved_gain = None
-        profile.browse_records = result.shortlist_records
+        profile.browse_records = list(result.shortlist_records)
         self.document.mark_changed()
         return True
 
     def is_current(self, request: AnalysisSearchRequest) -> bool:
+        if request.token.spectrum_id not in observed_by_id(self.project):
+            return False
         return self._token(request.token.spectrum_id, request.sources, request.query) == request.token

@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from vibrational_finder.core.data_sources import SourceQuery
+from vibrational_finder.core.instrument_profile import InstrumentProfile
 from vibrational_finder.cancellation import JobCancelled, checkpoint
 from vibrational_finder.core.models import CandidateRecord, SignalKind
 from vibrational_finder.band_detection import BandDetectionOptions, detect_bands
@@ -36,6 +37,7 @@ class CandidateSearchOptions:
     primary_raman: bool = False
     refine_raman_profiles: bool = True
     peak_priority: RamanPeakPriority = RamanPeakPriority.OFF
+    instrument_profile: InstrumentProfile | None = None
 
 
 @dataclass(slots=True)
@@ -82,6 +84,7 @@ class CandidateSearchService:
                 max_shift=matching.max_shift_cm1, refine_profiles=options.refine_raman_profiles,
                 candidate_gate=options.candidate_gate, for_gain=for_gain, gain_window=matching.gain_window,
                 shift_step=matching.shift_step_cm1, peak_priority=options.peak_priority,
+                instrument_profile=options.instrument_profile,
             )
             return CandidateSearchResult(ranked.matches, observed_bands, ranked.records, ranked.failures,
                                          ranked.scanned, ranked.unreadable)
@@ -103,7 +106,7 @@ class CandidateSearchService:
                 candidate_gate=options.candidate_gate,
             )
             return CandidateSearchResult(
-                matches=result.matches,
+                matches=_prefer_instrument(result.matches, options.instrument_profile),
                 observed_bands=result.observed_bands,
                 shortlist_records=result.shortlist_records,
                 source_failures=result.source_failures,
@@ -117,13 +120,13 @@ class CandidateSearchService:
         if options.candidate_gate is not None:
             candidates = [candidate for candidate in candidates if options.candidate_gate(candidate)]
         return CandidateSearchResult(
-            matches=rank_candidates(
+            matches=_prefer_instrument(rank_candidates(
                 observed,
                 candidates,
                 options.matching_options,
                 observed_processed=observed_processed,
                 observed_bands=observed_bands,
-            ),
+            ), options.instrument_profile),
             observed_bands=observed_bands,
             source_failures=source_failures,
         )
@@ -197,3 +200,11 @@ class CandidateSearchService:
                 )
             )
         return candidates
+
+
+def _prefer_instrument(
+    matches: list[VibrationalMatchResult], profile: InstrumentProfile | None,
+) -> list[VibrationalMatchResult]:
+    if profile is not None:
+        matches.sort(key=lambda row: profile.ranking_score(row.score.combined, row.candidate), reverse=True)
+    return matches

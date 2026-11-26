@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
+from html import escape
 
 from PySide6.QtCore import Signal, Qt
 from PySide6.QtGui import QActionGroup, QBrush, QColor
 from PySide6.QtWidgets import (
+    QApplication,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -19,6 +21,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from vibrational_finder.core.instrument_profile import InstrumentProfile
 from vibrational_finder.core.models import CandidateRecord, MatchScore
 from vibrational_finder.core.spectral_metadata import excitation_wavelength_nm as _laser_nm
 
@@ -27,20 +30,26 @@ from vibrational_finder.raman_gain import (
     priority_score, raman_priority_weights,
 )
 from vibrational_finder.models import SpectralBand, VibrationalMatchResult
+from vibrational_finder.ui.formula_display import display_formula
 from vibrational_finder.ui.managed_table import ManagedColumnTable, context_row_keys
 from vibrational_finder.ui.phase_color_delegate import PhaseColorDelegate
 
 
 _NUMERIC_ROLE = Qt.ItemDataRole.UserRole + 1
-_COMPOUND_COLUMN = 2
+_SOURCE_FORMULA_ROLE = Qt.ItemDataRole.UserRole + 2
+_RANK_ROLE = Qt.ItemDataRole.UserRole + 3
+_FORMULA_COLUMN, _COMPOUND_COLUMN = 1, 2
 _LASER_COLUMN, _MATCH_COLUMN, _GAIN_COLUMN = 3, 4, 5
 _UNSPECIFIED = "unspecified"
 
 
 class NumericTableItem(QTableWidgetItem):
     def __lt__(self, other: QTableWidgetItem) -> bool:
-        left = self.data(_NUMERIC_ROLE)
-        right = other.data(_NUMERIC_ROLE)
+        left, right = self.data(_RANK_ROLE), other.data(_RANK_ROLE)
+        if left is None:
+            left = self.data(_NUMERIC_ROLE)
+        if right is None:
+            right = other.data(_NUMERIC_ROLE)
         if left is None or right is None:
             return left is not None and right is None
         return float(left) < float(right)
@@ -89,6 +98,8 @@ class CandidateWorkspace(QWidget):
         self._records: dict[str, CandidateRecord] = {}
         self._excitation_by_key: dict[str, float | None] = {}
         self._excitation_filter: float | str | None = None
+        self._instrument_profile: InstrumentProfile | None = None
+        self._laser_bonus_by_key: dict[str, float] = {}
         self._remaining_positions: set[float] | None = None
         self._accepted_keys: set[str] = set()
         self._accepted_colors: dict[str, str] = {}
@@ -158,13 +169,14 @@ class CandidateWorkspace(QWidget):
         self.table.customContextMenuRequested.connect(self._show_candidate_menu)
         header = self.table.horizontalHeader()
         header.setSortIndicator(_MATCH_COLUMN, Qt.SortOrder.DescendingOrder)
+        self.table.horizontalHeaderItem(_LASER_COLUMN).setTextAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self.excitation_filter_button = QToolButton(header.viewport())
         self.excitation_filter_button.setObjectName("candidateExcitationFilter")
-        self.excitation_filter_button.setText("▾")
+        self.excitation_filter_button.setArrowType(Qt.ArrowType.DownArrow)
         self.excitation_filter_button.setAccessibleName("Filter excitation wavelengths")
         self.excitation_filter_button.setAutoRaise(True)
+        self.excitation_filter_button.setCheckable(True)
         self.excitation_filter_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.excitation_filter_button.setStyleSheet("QToolButton::menu-indicator { image: none; }")
         self.excitation_filter_menu = QMenu(self.excitation_filter_button)
         self._excitation_actions = QActionGroup(self.excitation_filter_menu)
         self._excitation_actions.setExclusive(True)
@@ -172,6 +184,7 @@ class CandidateWorkspace(QWidget):
         header.geometriesChanged.connect(self._position_excitation_filter)
         header.sectionResized.connect(self._position_excitation_filter)
         header.sectionMoved.connect(self._position_excitation_filter)
+        header.sortIndicatorChanged.connect(self._position_excitation_filter)
         self._rebuild_excitation_menu()
         self._position_excitation_filter()
         layout.addWidget(self.table, 1)
@@ -199,6 +212,11 @@ class CandidateWorkspace(QWidget):
         accept = self._candidate_menu.addAction("Add to working set", lambda: self.acceptRequested.emit(key))
         accept.setEnabled(key not in self._accepted_keys)
         self._candidate_menu.addSeparator()
+        formula = self.table.item(row, _FORMULA_COLUMN)
+        original = formula.data(_SOURCE_FORMULA_ROLE) if formula is not None else None
+        if original:
+            self._candidate_menu.addAction("Copy source formula", lambda: QApplication.clipboard().setText(original))
+            self._candidate_menu.addSeparator()
         self._candidate_menu.addAction("Export reference as RREF…",
                                        lambda: self.exportRequested.emit(keys, ".rref"))
         self._candidate_menu.addAction("Export reference as JSON…",
@@ -252,9 +270,24 @@ class CandidateWorkspace(QWidget):
 
     def _position_excitation_filter(self, *_args) -> None:
         header = self.table.horizontalHeader()
-        right = header.sectionViewportPosition(_LASER_COLUMN) + header.sectionSize(_LASER_COLUMN)
-        height = max(12, min(22, header.viewport().height() - 4))
-        self.excitation_filter_button.setGeometry(right - 22, (header.viewport().height() - height) // 2, 20, height)
+        left = header.sectionViewportPosition(_LASER_COLUMN)
+        width = header.sectionSize(_LASER_COLUMN)
+        button_width = min(20, max(0, width - 4))
+        sort_space = 0
+        if header.isSortIndicatorShown() and header.sortIndicatorSection() == _LASER_COLUMN:
+            sort_space = min(20, max(0, width - button_width - 4))
+        height = header.viewport().height()
+        button_height = max(0, min(22, height - 4))
+        x = left + width - button_width - sort_space - 2
+        self.excitation_filter_button.setGeometry(x, (height - button_height) // 2, button_width, button_height)
+        available = max(0, x - left - 10)
+        metrics = header.fontMetrics()
+        label = self.HEADERS[_LASER_COLUMN]
+        if metrics.horizontalAdvance(label) > available:
+            label = metrics.elidedText("Laser", Qt.TextElideMode.ElideRight, available)
+        item = self.table.horizontalHeaderItem(_LASER_COLUMN)
+        if item.text() != label:
+            item.setText(label)
 
     def _rebuild_excitation_menu(self) -> None:
         self.excitation_filter_menu.clear()
@@ -277,13 +310,32 @@ class CandidateWorkspace(QWidget):
     def _update_excitation_filter_button(self) -> None:
         active = self._excitation_filter
         label = f"{active:g} nm" if isinstance(active, float) else ("Unspecified" if active else "all wavelengths")
-        self.excitation_filter_button.setText("▾" if active is None else "▿")
+        self.excitation_filter_button.setChecked(active is not None)
         self.excitation_filter_button.setToolTip(f"Filter excitation wavelengths: {label}")
 
     def _set_excitation_filter(self, wavelength: float | str | None) -> None:
         self._excitation_filter = wavelength
         self._update_excitation_filter_button()
         self._fill_table()
+
+    def set_instrument_profile(self, profile: InstrumentProfile | None) -> None:
+        if profile == self._instrument_profile:
+            return
+        key = self.candidate_key_at(self.table.currentRow()) if self.table.currentRow() >= 0 else None
+        self._instrument_profile = profile
+        self._refresh_laser_bonus()
+        self._fill_table()
+        if key is not None:
+            for row in range(self.table.rowCount()):
+                if self.candidate_key_at(row) == key:
+                    self.table.setCurrentCell(row, _COMPOUND_COLUMN)
+                    break
+
+    def _refresh_laser_bonus(self) -> None:
+        profile = self._instrument_profile
+        self._laser_bonus_by_key = (
+            {record.key: profile.rank_bonus(record) for record in self._table_records()} if profile is not None else {}
+        )
 
     def set_gain_context(
         self, remaining_positions: Iterable[float] | None, accepted_keys: Iterable[str], *,
@@ -341,8 +393,21 @@ class CandidateWorkspace(QWidget):
         result = self._results.get(key)
         match = (NumericTableItem("Inactive") if result is not None and self._accepted_keys
                  else self._number(result.score.combined if result is not None else None))
+        gain = self._gain_item(result)
+        profile = self._instrument_profile
+        if profile is not None:
+            bonus = self._laser_bonus_by_key.get(key, 0.)
+            if result is None:
+                match.setData(_RANK_ROLE, bonus)
+            elif bonus:
+                for item in (match, gain):
+                    score = item.data(_NUMERIC_ROLE)
+                    if score is not None and score > 0.0:
+                        item.setData(_RANK_ROLE, float(score) + bonus)
+                        tip = item.toolTip()
+                        item.setToolTip((tip + "\n" if tip else "") + f"Ranked higher for {profile.laser_nm:g} nm.")
         self._set_row_item(row, _MATCH_COLUMN, match, key)
-        self._set_row_item(row, _GAIN_COLUMN, self._gain_item(result), key)
+        self._set_row_item(row, _GAIN_COLUMN, gain, key)
 
     def _gain_match(self, result: VibrationalMatchResult) -> GainMatch | None:
         if not self._gain_bands or not result.reference_bands or result.candidate.key in self._accepted_keys:
@@ -451,6 +516,7 @@ class CandidateWorkspace(QWidget):
 
     def _refresh_table_records(self) -> None:
         self._excitation_by_key = {record.key: _laser_nm(record) for record in self._table_records()}
+        self._refresh_laser_bonus()
         self._rebuild_excitation_menu()
         self._fill_table()
 
@@ -489,11 +555,24 @@ class CandidateWorkspace(QWidget):
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(records))
         for row, record in enumerate(records):
-            for column, value in enumerate((record.source, record.formula, record.name or record.entry_id)):
+            for column, value in ((0, record.source), (_COMPOUND_COLUMN, record.name or record.entry_id)):
                 item = QTableWidgetItem(value)
                 item.setToolTip(value)
                 self._set_row_item(row, column, item, record.key)
-            self._set_row_item(row, _LASER_COLUMN, self._number(self._excitation_by_key[record.key], compact=True), record.key)
+            original = record.formula
+            formatted = display_formula(original, record.source)
+            formula = QTableWidgetItem(formatted)
+            formula.setData(_SOURCE_FORMULA_ROLE, original)
+            if original:
+                tip = escape(formatted)
+                if formatted != original:
+                    tip += f"<br>Source: {escape(original)}"
+                formula.setToolTip(f"<p style='white-space: pre-wrap'>{tip}</p>")
+            self._set_row_item(row, _FORMULA_COLUMN, formula, record.key)
+            laser = self._number(self._excitation_by_key[record.key], compact=True)
+            if self._instrument_profile is not None and self._laser_bonus_by_key.get(record.key):
+                laser.setToolTip(f"Matches the {self._instrument_profile.name} instrument profile")
+            self._set_row_item(row, _LASER_COLUMN, laser, record.key)
             self._set_score_items(row, record.key)
         self.table.setSortingEnabled(sorting)
 
@@ -511,7 +590,7 @@ class CandidateWorkspace(QWidget):
     def set_pending(self, *, gain: bool = False) -> None:
         self.status_label.setText("Updating Gain…" if gain else "Searching spectroscopy references…")
         self._set_status_busy(True)
-        self.browse_cancel_button.setVisible(gain)
+        self.browse_cancel_button.show()
         self.match_button.setEnabled(False)
         self.cancel_button.setEnabled(True)
 
@@ -520,6 +599,10 @@ class CandidateWorkspace(QWidget):
         self._set_status_busy(True)
         self.table.setEnabled(False)
         self.browse_cancel_button.show()
+
+    def set_search_progress(self, message: str) -> None:
+        if self.status_bar.property("searchBusy"):
+            self.status_label.set_routine_text(message)
 
     def finish_browse(self, message: str = "") -> None:
         self.browse_cancel_button.hide()

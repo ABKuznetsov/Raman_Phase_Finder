@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, Iterable
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping
 
 from vibrational_finder.cancellation import JobCancelled, checkpoint
 from vibrational_finder.core.cache import app_cache_dir
@@ -35,6 +35,16 @@ class SourceDescriptor:
     remote_url: str = ""
     rest_connection: RestConnection | None = None
     local_cache_subdir: str = ""
+
+    @property
+    def preference_key(self) -> str | None:
+        """Identify workspace sources separately from transient project references."""
+        if self.remote_url:
+            kind = "rest" if self.rest_connection is not None else "catalog"
+            return f"{kind}:{self.remote_url}"
+        if self.name == ProjectReferenceSource.name or (self.user_managed and self.name != USER_LIBRARY_NAME):
+            return None
+        return f"builtin:{self.name}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +129,7 @@ def default_source_descriptors() -> list[SourceDescriptor]:
     from vibrational_finder.services.research_raman_source import MlrodSource, RamanBenchSource
     from vibrational_finder.services.rod_source import RodSource
     from vibrational_finder.services.rruff_source import RRUFF_DOWNLOAD_PAGE, RruffSource
+    from vibrational_finder.services.wurm_source import WURM_CATALOG_URL, WURM_NAME, WurmSource
 
     return [
         SourceDescriptor(
@@ -131,6 +142,7 @@ def default_source_descriptors() -> list[SourceDescriptor]:
         SourceDescriptor("OpenSpecy", (SignalKind.RAMAN,), OpenSpecyLibrarySource,
                          default_enabled=True, local_cache_subdir="openspecy"),
         SourceDescriptor("Oulu CRD", (SignalKind.RAMAN,), OuluRamanSource, website=OULU_RECORD_URL, local_cache_subdir="oulu_crd"),
+        SourceDescriptor(WURM_NAME, (SignalKind.RAMAN,), WurmSource, website=WURM_CATALOG_URL, local_cache_subdir="wurm"),
         SourceDescriptor(
             "MLROD", (SignalKind.RAMAN,), MlrodSource,
             website="https://ahed.nasa.gov/datasets/f5b6051bfeb18c5a7eaef6504582", local_cache_subdir="mlrod",
@@ -151,26 +163,27 @@ class SpectroscopySourceCatalog:
     _instances: dict[str, Any] = field(init=False, default_factory=dict)
     _failures: dict[str, str] = field(init=False, default_factory=dict)
     _refresh_revisions: dict[str, int] = field(init=False, default_factory=dict)
+    _defaulted_sources: set[str] = field(init=False, default_factory=set)
 
     def __post_init__(self) -> None:
         initial = default_source_descriptors() if self.descriptors is None else list(self.descriptors)
         for descriptor in initial:
             self._register(descriptor)
         if self.project is not None and (self.project.reference_records or self.project.reference_spectra):
-            had_setting = ProjectReferenceSource.name in self.ui_state.enabled_sources
             self._register(SourceDescriptor(
                 ProjectReferenceSource.name,
                 (SignalKind.RAMAN,),
                 lambda: ProjectReferenceSource(self.project),
+                default_enabled=True,
             ))
-            if not had_setting:
-                self.ui_state.enabled_sources[ProjectReferenceSource.name] = True
 
     def _register(self, descriptor: SourceDescriptor, instance: Any | None = None) -> str:
         self._descriptors[descriptor.name] = descriptor
         if instance is not None:
             self._instances[descriptor.name] = instance
-        self.ui_state.enabled_sources.setdefault(descriptor.name, descriptor.default_enabled)
+        if descriptor.name not in self.ui_state.enabled_sources:
+            self.ui_state.enabled_sources[descriptor.name] = descriptor.default_enabled
+            self._defaulted_sources.add(descriptor.name)
         return descriptor.name
 
     def names(self) -> list[str]:
@@ -191,10 +204,18 @@ class SpectroscopySourceCatalog:
     def descriptor(self, name: str) -> SourceDescriptor:
         return self._descriptors[name]
 
+    def apply_enabled_preferences(self, preferences: Mapping[str, bool]) -> None:
+        """Use workspace defaults only where the project has no explicit selection."""
+        for name in self._defaulted_sources:
+            key = self._descriptors[name].preference_key
+            if key is not None and key in preferences:
+                self.ui_state.enabled_sources[name] = preferences[key]
+
     def set_enabled(self, name: str, enabled: bool) -> None:
         if name not in self._descriptors:
             raise KeyError(name)
         self.ui_state.enabled_sources[name] = bool(enabled)
+        self._defaulted_sources.discard(name)
 
     def _instance(self, name: str) -> Any | None:
         instance = self._instances.get(name)
@@ -422,6 +443,7 @@ class SpectroscopySourceCatalog:
         self._instances.pop(name, None)
         self._failures.pop(name, None)
         self.ui_state.enabled_sources.pop(name, None)
+        self._defaulted_sources.discard(name)
 
     def _detect_kinds(self, source: Any) -> tuple[SignalKind, ...]:
         kinds = {record.kind for record in source.search(SourceQuery()) if record.kind != SignalKind.UNKNOWN}
